@@ -5,6 +5,12 @@
 #include <util/threading.h>
 #include "version.h"
 
+#define RECORD_MODE_NONE 0
+#define RECORD_MODE_ALWAYS 1
+#define RECORD_MODE_STREAMING 2
+#define RECORD_MODE_RECORDING 3
+#define RECORD_MODE_STREAMING_OR_RECORDING 4
+
 struct source_record_filter_context {
 	obs_source_t *source;
 	uint8_t *video_data;
@@ -220,7 +226,7 @@ static void start_file_output(struct source_record_filter_context *filter,
 	char path[512];
 	snprintf(path, 512, "%s/%s", obs_data_get_string(settings, "path"),
 		 os_generate_formatted_filename(
-			 obs_data_get_string(settings, "rec_format"), false,
+			 obs_data_get_string(settings, "rec_format"), true,
 			 obs_data_get_string(settings, "filename_formatting")));
 	obs_data_set_string(s, "path", path);
 	if (!filter->fileOutput) {
@@ -299,9 +305,9 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
 
-	const bool record = obs_data_get_bool(settings, "record");
+	const long long record_mode = obs_data_get_int(settings, "record_mode");
 	const bool replay_buffer = obs_data_get_bool(settings, "replay_buffer");
-	if (record || replay_buffer) {
+	if (record_mode != RECORD_MODE_NONE || replay_buffer) {
 		const char *enc_id = obs_data_get_string(settings, "encoder");
 		if (strcmp(enc_id, "qsv") == 0) {
 			enc_id = "obs_qsv11";
@@ -372,6 +378,17 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 					filter->replayOutput, filter->aacTrack,
 					0);
 		}
+	}
+	bool record = false;
+	if (record_mode == RECORD_MODE_ALWAYS) {
+		record = true;
+	} else if (record_mode == RECORD_MODE_RECORDING) {
+		record = obs_frontend_recording_active();
+	} else if (record_mode == RECORD_MODE_STREAMING) {
+		record = obs_frontend_streaming_active();
+	} else if (record_mode == RECORD_MODE_STREAMING_OR_RECORDING) {
+		record = obs_frontend_streaming_active() ||
+			 obs_frontend_recording_active();
 	}
 
 	if (record != filter->record) {
@@ -472,6 +489,21 @@ static void source_record_filter_defaults(obs_data_t *settings)
 	}
 }
 
+static void frontend_event(enum obs_frontend_event event, void *data)
+{
+	struct source_record_filter_context *context = data;
+	if (event == OBS_FRONTEND_EVENT_STREAMING_STARTING ||
+	    event == OBS_FRONTEND_EVENT_STREAMING_STARTED ||
+	    event == OBS_FRONTEND_EVENT_STREAMING_STOPPING ||
+	    event == OBS_FRONTEND_EVENT_STREAMING_STOPPED ||
+	    event == OBS_FRONTEND_EVENT_RECORDING_STARTING ||
+	    event == OBS_FRONTEND_EVENT_RECORDING_STARTED ||
+	    event == OBS_FRONTEND_EVENT_RECORDING_STOPPING ||
+	    event == OBS_FRONTEND_EVENT_RECORDING_STOPPED) {
+		obs_source_update(context->source, NULL);
+	}
+}
+
 static void *source_record_filter_create(obs_data_t *settings,
 					 obs_source_t *source)
 {
@@ -484,6 +516,7 @@ static void *source_record_filter_create(obs_data_t *settings,
 	source_record_filter_update(context, settings);
 	obs_add_main_render_callback(source_record_filter_offscreen_render,
 				     context);
+	obs_frontend_add_event_callback(frontend_event, context);
 	return context;
 }
 
@@ -493,6 +526,7 @@ static void source_record_filter_destroy(void *data)
 	if (context->output_active) {
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
 	}
+	obs_frontend_remove_event_callback(frontend_event, context);
 	obs_remove_main_render_callback(source_record_filter_offscreen_render,
 					context);
 	if (context->fileOutput) {
@@ -702,7 +736,19 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	}
 	obs_property_set_modified_callback2(p, encoder_changed, data);
 
-	obs_properties_add_bool(props, "record", obs_module_text("Record"));
+	p = obs_properties_add_list(props, "record_mode",
+				    obs_module_text("RecordMode"),
+				    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+
+	obs_property_list_add_int(p, obs_module_text("None"), RECORD_MODE_NONE);
+	obs_property_list_add_int(p, obs_module_text("Always"),
+				  RECORD_MODE_ALWAYS);
+	obs_property_list_add_int(p, obs_module_text("Streaming"),
+				  RECORD_MODE_STREAMING);
+	obs_property_list_add_int(p, obs_module_text("Recording"),
+				  RECORD_MODE_RECORDING);
+	obs_property_list_add_int(p, obs_module_text("StreamingOrRecording"),
+				  RECORD_MODE_STREAMING_OR_RECORDING);
 
 	obs_properties_t *replay = obs_properties_create();
 
