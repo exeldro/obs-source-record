@@ -301,6 +301,23 @@ static void start_replay_output(struct source_record_filter_context *filter,
 	pthread_create(&thread, NULL, start_replay_thread, filter);
 }
 
+static const char * get_encoder_id(obs_data_t * settings)
+{
+	const char *enc_id = obs_data_get_string(settings, "encoder");
+	if (strcmp(enc_id, "qsv") == 0) {
+		enc_id = "obs_qsv11";
+	} else if (strcmp(enc_id, "amd") == 0) {
+		enc_id = "amd_amf_h264";
+	} else if (strcmp(enc_id, "nvenc") == 0) {
+		//enc_id = EncoderAvailable("jim_nvenc") ? "jim_nvenc" : "ffmpeg_nvenc";
+		enc_id = "ffmpeg_nvenc";
+	} else if (strcmp(enc_id, "x264") == 0 ||
+		   strcmp(enc_id, "x264_lowcpu") == 0) {
+		enc_id = "obs_x264";
+	}
+	return enc_id;
+}
+
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
@@ -308,19 +325,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	const long long record_mode = obs_data_get_int(settings, "record_mode");
 	const bool replay_buffer = obs_data_get_bool(settings, "replay_buffer");
 	if (record_mode != RECORD_MODE_NONE || replay_buffer) {
-		const char *enc_id = obs_data_get_string(settings, "encoder");
-		if (strcmp(enc_id, "qsv") == 0) {
-			enc_id = "obs_qsv11";
-		} else if (strcmp(enc_id, "amd") == 0) {
-			enc_id = "amd_amf_h264";
-		} else if (strcmp(enc_id, "nvenc") == 0) {
-			enc_id = EncoderAvailable("jim_nvenc") ? "jim_nvenc"
-							       : "ffmpeg_nvenc";
-		} else if (strcmp(enc_id, "x264") == 0 ||
-			   strcmp(enc_id, "x264_lowcpu") == 0) {
-			enc_id = "obs_x264";
-		}
-
+		const char *enc_id = get_encoder_id(settings);
 		if (!filter->encoder ||
 		    strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
 			obs_encoder_release(filter->encoder);
@@ -666,18 +671,7 @@ static bool encoder_changed(void *data, obs_properties_t *props,
 {
 	struct source_record_filter_context *context = data;
 	obs_properties_remove_by_name(props, "encoder_group");
-	const char *enc_id = obs_data_get_string(settings, "encoder");
-	if (strcmp(enc_id, "qsv") == 0) {
-		enc_id = "obs_qsv11";
-	} else if (strcmp(enc_id, "amd") == 0) {
-		enc_id = "amd_amf_h264";
-	} else if (strcmp(enc_id, "nvenc") == 0) {
-		enc_id = EncoderAvailable("jim_nvenc") ? "jim_nvenc"
-						       : "ffmpeg_nvenc";
-	} else if (strcmp(enc_id, "x264") == 0 ||
-		   strcmp(enc_id, "x264_lowcpu") == 0) {
-		enc_id = "obs_x264";
-	}
+	const char *enc_id = get_encoder_id(settings);
 	obs_properties_t *enc_props = obs_get_encoder_properties(enc_id);
 	if (enc_props) {
 		obs_properties_add_group(props, "encoder_group",
