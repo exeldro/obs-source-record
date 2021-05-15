@@ -57,6 +57,52 @@ bool EncoderAvailable(const char *encoder)
 	return false;
 }
 
+static void calc_min_ts(obs_source_t *parent, obs_source_t *child, void *param)
+{
+	uint64_t *min_ts = param;
+	if (!child || obs_source_audio_pending(child))
+		return;
+	const uint64_t ts = obs_source_get_audio_timestamp(child);
+	if (!ts)
+		return;
+	if (!*min_ts || ts < *min_ts)
+		*min_ts = ts;
+}
+
+static void mix_audio(obs_source_t *parent, obs_source_t *child, void *param)
+{
+	if (!child || obs_source_audio_pending(child))
+		return;
+	const uint64_t ts = obs_source_get_audio_timestamp(child);
+	if (!ts)
+		return;
+	struct obs_source_audio *mixed_audio = param;
+	const size_t pos = ns_to_audio_frames(mixed_audio->samples_per_sec,
+					      ts - mixed_audio->timestamp);
+
+	if (pos > AUDIO_OUTPUT_FRAMES)
+		return;
+
+	const size_t count = AUDIO_OUTPUT_FRAMES - pos;
+
+	struct obs_source_audio_mix child_audio;
+	obs_source_get_audio_mix(child, &child_audio);
+	//for (size_t mix_idx = 0; mix_idx < MAX_AUDIO_MIXES; mix_idx++) {
+	//if ((mixers & (1 << mix_idx)) == 0)
+	//	continue;
+	const size_t mix_idx = 0;
+	for (size_t ch = 0; ch < mixed_audio->speakers; ch++) {
+		float *out = ((float *)mixed_audio->data[ch]) + pos;
+		float *in = child_audio.output[mix_idx].data[ch];
+		if (!in)
+			continue;
+		for (size_t i = 0; i < count; i++) {
+			out[i] += in[i];
+		}
+	}
+	//}
+}
+
 bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
 			  uint64_t *out_ts, uint32_t mixers,
 			  struct audio_output_data *mixes)
@@ -70,7 +116,26 @@ bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
 	const uint32_t flags = obs_source_get_output_flags(parent);
 	if ((flags & OBS_SOURCE_AUDIO) == 0 ||
 	    obs_source_audio_pending(parent)) {
-		*out_ts = start_ts_in;
+		uint64_t min_ts = 0;
+		obs_source_enum_active_tree(parent, calc_min_ts, &min_ts);
+		if (min_ts) {
+			struct obs_source_audio mixed_audio = {0};
+			for (size_t i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+				mixed_audio.data[i] = (uint8_t *)mixes->data[i];
+			}
+			mixed_audio.timestamp = min_ts;
+			mixed_audio.speakers =
+				audio_output_get_channels(filter->audio_output);
+			mixed_audio.samples_per_sec =
+				audio_output_get_sample_rate(
+					filter->audio_output);
+			mixed_audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
+			obs_source_enum_active_tree(parent, mix_audio,
+						    &mixed_audio);
+			*out_ts = min_ts;
+		} else {
+			*out_ts = start_ts_in;
+		}
 		return true;
 	}
 
@@ -301,7 +366,7 @@ static void start_replay_output(struct source_record_filter_context *filter,
 	pthread_create(&thread, NULL, start_replay_thread, filter);
 }
 
-static const char * get_encoder_id(obs_data_t * settings)
+static const char *get_encoder_id(obs_data_t *settings)
 {
 	const char *enc_id = obs_data_get_string(settings, "encoder");
 	if (strcmp(enc_id, "qsv") == 0) {

@@ -1,4 +1,4 @@
-project(source-record VERSION 0.1.2)
+project(source-record VERSION 0.1.3)
 set(PROJECT_FULL_NAME "Source Record")
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.h.in ${CMAKE_CURRENT_SOURCE_DIR}/version.h)
