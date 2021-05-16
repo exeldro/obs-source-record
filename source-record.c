@@ -32,6 +32,8 @@ struct source_record_filter_context {
 	bool record;
 	bool replayBuffer;
 	obs_hotkey_id replayHotkey;
+	obs_weak_source_t *audio_source;
+	bool closing;
 };
 
 static const char *source_record_filter_get_name(void *unused)
@@ -108,16 +110,28 @@ bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
 			  struct audio_output_data *mixes)
 {
 	struct source_record_filter_context *filter = param;
+	if (filter->closing) {
+		*out_ts = start_ts_in;
+		return true;
+	}
 
-	obs_source_t *parent = obs_filter_get_parent(filter->source);
-	if (!parent)
-		return false;
+	obs_source_t *audio_source = NULL;
+	if (filter->audio_source) {
+		audio_source = obs_weak_source_get_source(filter->audio_source);
+		if (audio_source)
+			obs_source_release(audio_source);
+	} else {
+		audio_source = obs_filter_get_parent(filter->source);
+	}
+	if (!audio_source) {
+		*out_ts = start_ts_in;
+		return true;
+	}
 
-	const uint32_t flags = obs_source_get_output_flags(parent);
-	if ((flags & OBS_SOURCE_AUDIO) == 0 ||
-	    obs_source_audio_pending(parent)) {
+	const uint32_t flags = obs_source_get_output_flags(audio_source);
+	if ((flags & OBS_SOURCE_COMPOSITE) != 0) {
 		uint64_t min_ts = 0;
-		obs_source_enum_active_tree(parent, calc_min_ts, &min_ts);
+		obs_source_enum_active_tree(audio_source, calc_min_ts, &min_ts);
 		if (min_ts) {
 			struct obs_source_audio mixed_audio = {0};
 			for (size_t i = 0; i < MAX_AUDIO_CHANNELS; i++) {
@@ -130,7 +144,7 @@ bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
 				audio_output_get_sample_rate(
 					filter->audio_output);
 			mixed_audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
-			obs_source_enum_active_tree(parent, mix_audio,
+			obs_source_enum_active_tree(audio_source, mix_audio,
 						    &mixed_audio);
 			*out_ts = min_ts;
 		} else {
@@ -138,13 +152,19 @@ bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
 		}
 		return true;
 	}
+	if ((flags & OBS_SOURCE_AUDIO) == 0) {
+		*out_ts = start_ts_in;
+		return true;
+	}
+	if (obs_source_audio_pending(audio_source))
+		return false;
 
-	const uint64_t source_ts = obs_source_get_audio_timestamp(parent);
+	const uint64_t source_ts = obs_source_get_audio_timestamp(audio_source);
 	if (!source_ts)
 		return false;
 
 	struct obs_source_audio_mix audio;
-	obs_source_get_audio_mix(parent, &audio);
+	obs_source_get_audio_mix(audio_source, &audio);
 
 	const size_t channels = audio_output_get_channels(filter->audio_output);
 	for (size_t mix_idx = 0; mix_idx < MAX_AUDIO_MIXES; mix_idx++) {
@@ -167,6 +187,8 @@ bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
 void source_record_filter_offscreen_render(void *data, uint32_t cx, uint32_t cy)
 {
 	struct source_record_filter_context *filter = data;
+	if (filter->closing)
+		return;
 	if (!obs_source_enabled(filter->source))
 		return;
 
@@ -506,6 +528,42 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			filter->aacTrack = NULL;
 		}
 	}
+
+	if (obs_data_get_bool(settings, "different_audio")) {
+		const char *source_name =
+			obs_data_get_string(settings, "audio_source");
+		if (!strlen(source_name)) {
+			if (filter->audio_source) {
+				obs_weak_source_release(filter->audio_source);
+				filter->audio_source = NULL;
+			}
+		} else {
+			obs_source_t *source = obs_weak_source_get_source(
+				filter->audio_source);
+			if (source)
+				obs_source_release(source);
+			if (!source ||
+			    strcmp(source_name, obs_source_get_name(source)) !=
+				    0) {
+				if (filter->audio_source) {
+					obs_weak_source_release(
+						filter->audio_source);
+					filter->audio_source = NULL;
+				}
+				source = obs_get_source_by_name(source_name);
+				if (source) {
+					filter->audio_source =
+						obs_source_get_weak_source(
+							source);
+					obs_source_release(source);
+				}
+			}
+		}
+
+	} else if (filter->audio_source) {
+		obs_weak_source_release(filter->audio_source);
+		filter->audio_source = NULL;
+	}
 }
 
 static void source_record_filter_defaults(obs_data_t *settings)
@@ -536,11 +594,13 @@ static void source_record_filter_defaults(obs_data_t *settings)
 	const char *enc_id;
 	if (adv_out) {
 		enc_id = config_get_string(config, "AdvOut", "RecEncoder");
-		if (strcmp(enc_id, "none") == 0 ||
-		    strcmp(enc_id, "None") == 0) {
+		if (strcmp(enc_id, "none") == 0 || strcmp(enc_id, "None") == 0)
 			enc_id = config_get_string(config, "AdvOut", "Encoder");
-		}
-		obs_data_set_default_string(settings, "encoder", enc_id);
+		else if (strcmp(enc_id, "jim_nvenc") == 0)
+			enc_id = "nvenc";
+		else
+			obs_data_set_default_string(settings, "encoder",
+						    enc_id);
 	} else {
 		const char *quality =
 			config_get_string(config, "SimpleOutput", "RecQuality");
@@ -593,36 +653,48 @@ static void *source_record_filter_create(obs_data_t *settings,
 static void source_record_filter_destroy(void *data)
 {
 	struct source_record_filter_context *context = data;
+	context->closing = true;
 	if (context->output_active) {
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
+		context->output_active = false;
 	}
 	obs_frontend_remove_event_callback(frontend_event, context);
 	obs_remove_main_render_callback(source_record_filter_offscreen_render,
 					context);
+
 	if (context->fileOutput) {
-		pthread_t thread;
-		pthread_create(&thread, NULL, force_stop_output_thread,
-			       context->fileOutput);
+		obs_output_force_stop(context->fileOutput);
+		obs_output_release(context->fileOutput);
 		context->fileOutput = NULL;
 	}
 	if (context->replayOutput) {
-		pthread_t thread;
-		pthread_create(&thread, NULL, force_stop_output_thread,
-			       context->replayOutput);
+		obs_output_force_stop(context->replayOutput);
+		obs_output_release(context->replayOutput);
 		context->replayOutput = NULL;
 	}
 
 	video_output_stop(context->video_output);
 
-	audio_output_close(context->audio_output);
-
 	video_t *o = context->video_output;
 	context->video_output = NULL;
+
+	obs_encoder_release(context->aacTrack);
+	obs_encoder_release(context->encoder);
+
+	obs_weak_source_release(context->audio_source);
+	context->audio_source = NULL;
+
+	audio_output_close(context->audio_output);
+
 	video_output_close(o);
+
+	obs_enter_graphics();
 
 	gs_stagesurface_unmap(context->stagesurface);
 	gs_stagesurface_destroy(context->stagesurface);
 	gs_texrender_destroy(context->texrender);
+
+	obs_leave_graphics();
 	bfree(context);
 }
 
@@ -642,6 +714,9 @@ static void save_replay(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
 static void source_record_filter_tick(void *data, float seconds)
 {
 	struct source_record_filter_context *context = data;
+	if (context->closing)
+		return;
+
 	obs_source_t *parent = obs_filter_get_parent(context->source);
 	if (!parent)
 		return;
@@ -746,6 +821,20 @@ static bool encoder_changed(void *data, obs_properties_t *props,
 	return true;
 }
 
+static bool list_add_audio_sources(void *data, obs_source_t *source)
+{
+	obs_property_t *p = data;
+	const uint32_t flags = obs_source_get_output_flags(source);
+	if ((flags & OBS_SOURCE_COMPOSITE) != 0) {
+		obs_property_list_add_string(p, obs_source_get_name(source),
+					     obs_source_get_name(source));
+	} else if ((flags & OBS_SOURCE_AUDIO) != 0) {
+		obs_property_list_add_string(p, obs_source_get_name(source),
+					     obs_source_get_name(source));
+	}
+	return true;
+}
+
 static obs_properties_t *source_record_filter_properties(void *data)
 {
 	struct source_record_filter_context *s = data;
@@ -819,6 +908,18 @@ static obs_properties_t *source_record_filter_properties(void *data)
 				 obs_module_text("ReplayBuffer"),
 				 OBS_GROUP_CHECKABLE, replay);
 
+	obs_properties_t *audio = obs_properties_create();
+	p = obs_properties_add_list(audio, "audio_source",
+				    obs_module_text("Source"),
+				    OBS_COMBO_TYPE_EDITABLE,
+				    OBS_COMBO_FORMAT_STRING);
+	obs_enum_sources(list_add_audio_sources, p);
+	obs_enum_scenes(list_add_audio_sources, p);
+
+	obs_properties_add_group(props, "different_audio",
+				 obs_module_text("DifferentAudio"),
+				 OBS_GROUP_CHECKABLE, audio);
+
 	obs_properties_t *group = obs_properties_create();
 	obs_properties_add_group(props, "encoder_group",
 				 obs_module_text("Encoder"), OBS_GROUP_NORMAL,
@@ -836,22 +937,20 @@ void source_record_filter_render(void *data, gs_effect_t *effect)
 static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 {
 	struct source_record_filter_context *context = data;
-	if (context->output_active) {
-		if (context->fileOutput) {
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       context->fileOutput);
-			context->fileOutput = NULL;
-		}
-		if (context->replayOutput) {
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       context->replayOutput);
-			context->replayOutput = NULL;
-		}
-		context->output_active = false;
-		obs_source_dec_showing(parent);
+	context->closing = true;
+	if (context->fileOutput) {
+		obs_output_force_stop(context->fileOutput);
+		obs_output_release(context->fileOutput);
+		context->fileOutput = NULL;
 	}
+	if (context->replayOutput) {
+		obs_output_force_stop(context->replayOutput);
+		obs_output_release(context->replayOutput);
+		context->replayOutput = NULL;
+	}
+	obs_frontend_remove_event_callback(frontend_event, context);
+	obs_remove_main_render_callback(source_record_filter_offscreen_render,
+					context);
 }
 
 struct obs_source_info source_record_filter_info = {
