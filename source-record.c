@@ -5,11 +5,11 @@
 #include <util/threading.h>
 #include "version.h"
 
-#define RECORD_MODE_NONE 0
-#define RECORD_MODE_ALWAYS 1
-#define RECORD_MODE_STREAMING 2
-#define RECORD_MODE_RECORDING 3
-#define RECORD_MODE_STREAMING_OR_RECORDING 4
+#define OUTPUT_MODE_NONE 0
+#define OUTPUT_MODE_ALWAYS 1
+#define OUTPUT_MODE_STREAMING 2
+#define OUTPUT_MODE_RECORDING 3
+#define OUTPUT_MODE_STREAMING_OR_RECORDING 4
 
 struct source_record_filter_context {
 	obs_source_t *source;
@@ -23,13 +23,17 @@ struct source_record_filter_context {
 	gs_texrender_t *texrender;
 	gs_stagesurf_t *stagesurface;
 	bool starting_file_output;
+	bool starting_stream_output;
 	bool starting_replay_output;
 	bool restart;
 	obs_output_t *fileOutput;
+	obs_output_t *streamOutput;
 	obs_output_t *replayOutput;
 	obs_encoder_t *encoder;
 	obs_encoder_t *aacTrack;
+	obs_service_t *service;
 	bool record;
+	bool stream;
 	bool replayBuffer;
 	obs_hotkey_id replayHotkey;
 	obs_weak_source_t *audio_source;
@@ -89,20 +93,16 @@ static void mix_audio(obs_source_t *parent, obs_source_t *child, void *param)
 
 	struct obs_source_audio_mix child_audio;
 	obs_source_get_audio_mix(child, &child_audio);
-	//for (size_t mix_idx = 0; mix_idx < MAX_AUDIO_MIXES; mix_idx++) {
-	//if ((mixers & (1 << mix_idx)) == 0)
-	//	continue;
 	const size_t mix_idx = 0;
 	for (size_t ch = 0; ch < mixed_audio->speakers; ch++) {
 		float *out = ((float *)mixed_audio->data[ch]) + pos;
-		float *in = child_audio.output[mix_idx].data[ch];
+		float *in = child_audio.output[0].data[ch];
 		if (!in)
 			continue;
 		for (size_t i = 0; i < count; i++) {
 			out[i] += in[i];
 		}
 	}
-	//}
 }
 
 bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
@@ -172,7 +172,7 @@ bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
 			continue;
 		for (size_t ch = 0; ch < channels; ch++) {
 			float *out = mixes[mix_idx].data[ch];
-			float *in = audio.output[mix_idx].data[ch];
+			float *in = audio.output[0].data[ch];
 			memcpy(out, in,
 			       AUDIO_OUTPUT_FRAMES * MAX_AUDIO_CHANNELS *
 				       sizeof(float));
@@ -270,7 +270,7 @@ void source_record_filter_offscreen_render(void *data, uint32_t cx, uint32_t cy)
 	video_output_unlock_frame(filter->video_output);
 }
 
-static void *start_output_thread(void *data)
+static void *start_file_output_thread(void *data)
 {
 	struct source_record_filter_context *context = data;
 	if (obs_output_start(context->fileOutput)) {
@@ -281,6 +281,20 @@ static void *start_output_thread(void *data)
 		}
 	}
 	context->starting_file_output = false;
+	return NULL;
+}
+
+static void *start_stream_output_thread(void *data)
+{
+	struct source_record_filter_context *context = data;
+	if (obs_output_start(context->streamOutput)) {
+		if (!context->output_active) {
+			context->output_active = true;
+			obs_source_inc_showing(
+				obs_filter_get_parent(context->source));
+		}
+	}
+	context->starting_stream_output = false;
 	return NULL;
 }
 
@@ -339,7 +353,62 @@ static void start_file_output(struct source_record_filter_context *filter,
 	filter->starting_file_output = true;
 
 	pthread_t thread;
-	pthread_create(&thread, NULL, start_output_thread, filter);
+	pthread_create(&thread, NULL, start_file_output_thread, filter);
+}
+
+#define FTL_PROTOCOL "ftl"
+#define RTMP_PROTOCOL "rtmp"
+
+static void start_stream_output(struct source_record_filter_context *filter,
+				obs_data_t *settings)
+{
+	if (!filter->service) {
+		filter->service = obs_service_create(
+			"rtmp_custom", obs_source_get_name(filter->source),
+			settings, NULL);
+	} else {
+		obs_service_update(filter->service, settings);
+	}
+	obs_service_apply_encoder_settings(filter->service, settings, NULL);
+
+	const char *type = obs_service_get_output_type(filter->service);
+	if (!type) {
+		type = "rtmp_output";
+		const char *url = obs_service_get_url(filter->service);
+		if (url != NULL &&
+		    strncmp(url, FTL_PROTOCOL, strlen(FTL_PROTOCOL)) == 0) {
+			type = "ftl_output";
+		} else if (url != NULL && strncmp(url, RTMP_PROTOCOL,
+						  strlen(RTMP_PROTOCOL)) != 0) {
+			type = "ffmpeg_mpegts_muxer";
+		}
+	}
+
+	if (!filter->streamOutput) {
+		filter->streamOutput = obs_output_create(
+			type, obs_source_get_name(filter->source), settings,
+			NULL);
+	} else {
+		obs_output_update(filter->streamOutput, settings);
+	}
+	obs_output_set_service(filter->streamOutput, filter->service);
+
+	if (filter->encoder) {
+		obs_encoder_set_video(filter->encoder, filter->video_output);
+		obs_output_set_video_encoder(filter->streamOutput,
+					     filter->encoder);
+	}
+
+	if (filter->aacTrack) {
+		obs_encoder_set_audio(filter->aacTrack, filter->audio_output);
+		obs_output_set_audio_encoder(filter->streamOutput,
+					     filter->aacTrack, 0);
+	}
+
+	filter->starting_stream_output = true;
+
+	pthread_t thread;
+	pthread_create(&thread, NULL, start_stream_output_thread, filter);
 }
 
 static void start_replay_output(struct source_record_filter_context *filter,
@@ -410,8 +479,10 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	struct source_record_filter_context *filter = data;
 
 	const long long record_mode = obs_data_get_int(settings, "record_mode");
+	const long long stream_mode = obs_data_get_int(settings, "stream_mode");
 	const bool replay_buffer = obs_data_get_bool(settings, "replay_buffer");
-	if (record_mode != RECORD_MODE_NONE || replay_buffer) {
+	if (record_mode != OUTPUT_MODE_NONE ||
+	    stream_mode != OUTPUT_MODE_NONE || replay_buffer) {
 		const char *enc_id = get_encoder_id(settings);
 		if (!filter->encoder ||
 		    strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
@@ -472,13 +543,13 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		}
 	}
 	bool record = false;
-	if (record_mode == RECORD_MODE_ALWAYS) {
+	if (record_mode == OUTPUT_MODE_ALWAYS) {
 		record = true;
-	} else if (record_mode == RECORD_MODE_RECORDING) {
+	} else if (record_mode == OUTPUT_MODE_RECORDING) {
 		record = obs_frontend_recording_active();
-	} else if (record_mode == RECORD_MODE_STREAMING) {
+	} else if (record_mode == OUTPUT_MODE_STREAMING) {
 		record = obs_frontend_streaming_active();
-	} else if (record_mode == RECORD_MODE_STREAMING_OR_RECORDING) {
+	} else if (record_mode == OUTPUT_MODE_STREAMING_OR_RECORDING) {
 		record = obs_frontend_streaming_active() ||
 			 obs_frontend_recording_active();
 	}
@@ -518,7 +589,36 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		filter->replayBuffer = replay_buffer;
 	}
 
-	if (!replay_buffer && !record) {
+	bool stream = false;
+	if (stream_mode == OUTPUT_MODE_ALWAYS) {
+		stream = true;
+	} else if (stream_mode == OUTPUT_MODE_RECORDING) {
+		stream = obs_frontend_recording_active();
+	} else if (stream_mode == OUTPUT_MODE_STREAMING) {
+		stream = obs_frontend_streaming_active();
+	} else if (stream_mode == OUTPUT_MODE_STREAMING_OR_RECORDING) {
+		stream = obs_frontend_streaming_active() ||
+			 obs_frontend_recording_active();
+	}
+
+	if (stream != filter->stream) {
+		if (stream) {
+			if (obs_source_enabled(filter->source) &&
+			    filter->video_output)
+				start_stream_output(filter, settings);
+		} else {
+			if (filter->streamOutput) {
+				pthread_t thread;
+				pthread_create(&thread, NULL,
+					       force_stop_output_thread,
+					       filter->streamOutput);
+				filter->streamOutput = NULL;
+			}
+		}
+		filter->stream = stream;
+	}
+
+	if (!replay_buffer && !record && !stream) {
 		if (filter->encoder) {
 			obs_encoder_release(filter->encoder);
 			filter->encoder = NULL;
@@ -667,6 +767,11 @@ static void source_record_filter_destroy(void *data)
 		obs_output_release(context->fileOutput);
 		context->fileOutput = NULL;
 	}
+	if (context->streamOutput) {
+		obs_output_force_stop(context->streamOutput);
+		obs_output_release(context->streamOutput);
+		context->streamOutput = NULL;
+	}
 	if (context->replayOutput) {
 		obs_output_force_stop(context->replayOutput);
 		obs_output_release(context->replayOutput);
@@ -687,6 +792,8 @@ static void source_record_filter_destroy(void *data)
 	audio_output_close(context->audio_output);
 
 	video_output_close(o);
+
+	obs_service_release(context->service);
 
 	obs_enter_graphics();
 
@@ -777,13 +884,17 @@ static void source_record_filter_tick(void *data, float seconds)
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
 	} else if (!context->output_active &&
 		   obs_source_enabled(context->source) &&
-		   (context->replayBuffer || context->record)) {
+		   (context->replayBuffer || context->record ||
+		    context->stream)) {
 		if (context->starting_file_output ||
+		    context->starting_stream_output ||
 		    context->starting_replay_output || !context->video_output)
 			return;
 		obs_data_t *s = obs_source_get_settings(context->source);
 		if (context->record)
 			start_file_output(context, s);
+		if (context->stream)
+			start_stream_output(context, s);
 		if (context->replayBuffer)
 			start_replay_output(context, s);
 		obs_data_release(s);
@@ -840,20 +951,86 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	struct source_record_filter_context *s = data;
 	obs_properties_t *props = obs_properties_create();
 
-	obs_properties_add_path(props, "path", obs_module_text("Path"),
+	obs_properties_t *record = obs_properties_create();
+
+	obs_property_t *p = obs_properties_add_list(
+		record, "record_mode", obs_module_text("RecordMode"),
+		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+
+	obs_property_list_add_int(p, obs_module_text("None"), OUTPUT_MODE_NONE);
+	obs_property_list_add_int(p, obs_module_text("Always"),
+				  OUTPUT_MODE_ALWAYS);
+	obs_property_list_add_int(p, obs_module_text("Streaming"),
+				  OUTPUT_MODE_STREAMING);
+	obs_property_list_add_int(p, obs_module_text("Recording"),
+				  OUTPUT_MODE_RECORDING);
+	obs_property_list_add_int(p, obs_module_text("StreamingOrRecording"),
+				  OUTPUT_MODE_STREAMING_OR_RECORDING);
+
+	obs_properties_add_path(record, "path", obs_module_text("Path"),
 				OBS_PATH_DIRECTORY, NULL, NULL);
-	obs_properties_add_text(props, "filename_formatting",
+	obs_properties_add_text(record, "filename_formatting",
 				obs_module_text("FilenameFormatting"),
 				OBS_TEXT_DEFAULT);
-	obs_property_t *p = obs_properties_add_list(
-		props, "rec_format", obs_module_text("RecFormat"),
-		OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
+	p = obs_properties_add_list(record, "rec_format",
+				    obs_module_text("RecFormat"),
+				    OBS_COMBO_TYPE_EDITABLE,
+				    OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p, "flv", "flv");
 	obs_property_list_add_string(p, "mp4", "mp4");
 	obs_property_list_add_string(p, "mov", "mov");
 	obs_property_list_add_string(p, "mkv", "mkv");
 	obs_property_list_add_string(p, "ts", "ts");
 	obs_property_list_add_string(p, "m3u8", "m3u8");
+
+	obs_properties_add_group(props, "record", obs_module_text("Record"),
+				 OBS_GROUP_NORMAL, record);
+
+	obs_properties_t *replay = obs_properties_create();
+
+	p = obs_properties_add_int(replay, "replay_duration",
+				   obs_module_text("Duration"), 0, 100, 1);
+	obs_property_int_set_suffix(p, "s");
+
+	obs_properties_add_group(props, "replay_buffer",
+				 obs_module_text("ReplayBuffer"),
+				 OBS_GROUP_CHECKABLE, replay);
+
+	obs_properties_t *stream = obs_properties_create();
+
+	p = obs_properties_add_list(stream, "stream_mode",
+				    obs_module_text("StreamMode"),
+				    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+
+	obs_property_list_add_int(p, obs_module_text("None"), OUTPUT_MODE_NONE);
+	obs_property_list_add_int(p, obs_module_text("Always"),
+				  OUTPUT_MODE_ALWAYS);
+	obs_property_list_add_int(p, obs_module_text("Streaming"),
+				  OUTPUT_MODE_STREAMING);
+	obs_property_list_add_int(p, obs_module_text("Recording"),
+				  OUTPUT_MODE_RECORDING);
+	obs_property_list_add_int(p, obs_module_text("StreamingOrRecording"),
+				  OUTPUT_MODE_STREAMING_OR_RECORDING);
+
+	obs_properties_add_text(stream, "server", obs_module_text("Server"),
+				OBS_TEXT_DEFAULT);
+	obs_properties_add_text(stream, "key", obs_module_text("Key"),
+				OBS_TEXT_PASSWORD);
+
+	obs_properties_add_group(props, "stream", obs_module_text("Stream"),
+				 OBS_GROUP_NORMAL, stream);
+
+	obs_properties_t *audio = obs_properties_create();
+	p = obs_properties_add_list(audio, "audio_source",
+				    obs_module_text("Source"),
+				    OBS_COMBO_TYPE_EDITABLE,
+				    OBS_COMBO_FORMAT_STRING);
+	obs_enum_sources(list_add_audio_sources, p);
+	obs_enum_scenes(list_add_audio_sources, p);
+
+	obs_properties_add_group(props, "different_audio",
+				 obs_module_text("DifferentAudio"),
+				 OBS_GROUP_CHECKABLE, audio);
 
 	p = obs_properties_add_list(props, "encoder",
 				    obs_module_text("Encoder"),
@@ -883,42 +1060,6 @@ static obs_properties_t *source_record_filter_properties(void *data)
 		obs_property_list_add_string(p, name, enc_id);
 	}
 	obs_property_set_modified_callback2(p, encoder_changed, data);
-
-	p = obs_properties_add_list(props, "record_mode",
-				    obs_module_text("RecordMode"),
-				    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-
-	obs_property_list_add_int(p, obs_module_text("None"), RECORD_MODE_NONE);
-	obs_property_list_add_int(p, obs_module_text("Always"),
-				  RECORD_MODE_ALWAYS);
-	obs_property_list_add_int(p, obs_module_text("Streaming"),
-				  RECORD_MODE_STREAMING);
-	obs_property_list_add_int(p, obs_module_text("Recording"),
-				  RECORD_MODE_RECORDING);
-	obs_property_list_add_int(p, obs_module_text("StreamingOrRecording"),
-				  RECORD_MODE_STREAMING_OR_RECORDING);
-
-	obs_properties_t *replay = obs_properties_create();
-
-	p = obs_properties_add_int(replay, "replay_duration",
-				   obs_module_text("Duration"), 0, 100, 1);
-	obs_property_int_set_suffix(p, "s");
-
-	obs_properties_add_group(props, "replay_buffer",
-				 obs_module_text("ReplayBuffer"),
-				 OBS_GROUP_CHECKABLE, replay);
-
-	obs_properties_t *audio = obs_properties_create();
-	p = obs_properties_add_list(audio, "audio_source",
-				    obs_module_text("Source"),
-				    OBS_COMBO_TYPE_EDITABLE,
-				    OBS_COMBO_FORMAT_STRING);
-	obs_enum_sources(list_add_audio_sources, p);
-	obs_enum_scenes(list_add_audio_sources, p);
-
-	obs_properties_add_group(props, "different_audio",
-				 obs_module_text("DifferentAudio"),
-				 OBS_GROUP_CHECKABLE, audio);
 
 	obs_properties_t *group = obs_properties_create();
 	obs_properties_add_group(props, "encoder_group",
