@@ -36,6 +36,7 @@ struct source_record_filter_context {
 	bool stream;
 	bool replayBuffer;
 	obs_hotkey_id replayHotkey;
+	obs_hotkey_pair_id enableHotkey;
 	obs_weak_source_t *audio_source;
 	bool closing;
 };
@@ -743,6 +744,7 @@ static void *source_record_filter_create(obs_data_t *settings,
 
 	context->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
 	context->replayHotkey = OBS_INVALID_HOTKEY_ID;
+	context->enableHotkey = OBS_INVALID_HOTKEY_PAIR_ID;
 	source_record_filter_update(context, settings);
 	obs_add_main_render_callback(source_record_filter_offscreen_render,
 				     context);
@@ -779,6 +781,11 @@ static void source_record_filter_destroy(void *data)
 	}
 
 	video_output_stop(context->video_output);
+
+	if (context->replayHotkey != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(context->replayHotkey);
+	if (context->enableHotkey != OBS_INVALID_HOTKEY_PAIR_ID)
+		obs_hotkey_pair_unregister(context->enableHotkey);
 
 	video_t *o = context->video_output;
 	context->video_output = NULL;
@@ -818,6 +825,32 @@ static void save_replay(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
 	calldata_free(&cd);
 }
 
+static bool source_record_enable_hotkey(void *data, obs_hotkey_pair_id id,
+					obs_hotkey_t *hotkey, bool pressed)
+{
+	struct source_record_filter_context *context = data;
+	if (!pressed)
+		return false;
+
+	if (obs_source_enabled(context->source))
+		return false;
+
+	obs_source_set_enabled(context->source, true);
+	return true;
+}
+
+static bool source_record_disable_hotkey(void *data, obs_hotkey_pair_id id,
+					 obs_hotkey_t *hotkey, bool pressed)
+{
+	struct source_record_filter_context *context = data;
+	if (!pressed)
+		return false;
+	if (!obs_source_enabled(context->source))
+		return false;
+	obs_source_set_enabled(context->source, false);
+	return true;
+}
+
 static void source_record_filter_tick(void *data, float seconds)
 {
 	struct source_record_filter_context *context = data;
@@ -832,6 +865,15 @@ static void source_record_filter_tick(void *data, float seconds)
 		context->replayHotkey = obs_hotkey_register_source(
 			parent, "save_replay", obs_module_text("SaveReplay"),
 			save_replay, context);
+
+	if (context->enableHotkey == OBS_INVALID_HOTKEY_PAIR_ID)
+		context->enableHotkey = obs_hotkey_pair_register_source(
+			parent, "source_record.enable",
+			obs_module_text("SourceRecordEnable"),
+			"source_record.disable",
+			obs_module_text("SourceRecordDisable"),
+			source_record_enable_hotkey,
+			source_record_disable_hotkey, context, context);
 
 	const uint32_t width = obs_source_get_width(parent);
 	const uint32_t height = obs_source_get_height(parent);
