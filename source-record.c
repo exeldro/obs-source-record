@@ -10,6 +10,7 @@
 #define OUTPUT_MODE_STREAMING 2
 #define OUTPUT_MODE_RECORDING 3
 #define OUTPUT_MODE_STREAMING_OR_RECORDING 4
+#define OUTPUT_MODE_VIRTUAL_CAMERA 5
 
 struct source_record_filter_context {
 	obs_source_t *source;
@@ -553,6 +554,8 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	} else if (record_mode == OUTPUT_MODE_STREAMING_OR_RECORDING) {
 		record = obs_frontend_streaming_active() ||
 			 obs_frontend_recording_active();
+	} else if (record_mode == OUTPUT_MODE_VIRTUAL_CAMERA) {
+		record = obs_frontend_virtualcam_active();
 	}
 
 	if (record != filter->record) {
@@ -600,6 +603,8 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	} else if (stream_mode == OUTPUT_MODE_STREAMING_OR_RECORDING) {
 		stream = obs_frontend_streaming_active() ||
 			 obs_frontend_recording_active();
+	} else if (stream_mode == OUTPUT_MODE_VIRTUAL_CAMERA) {
+		stream = obs_frontend_virtualcam_active();
 	}
 
 	if (stream != filter->stream) {
@@ -730,7 +735,9 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 	    event == OBS_FRONTEND_EVENT_RECORDING_STARTING ||
 	    event == OBS_FRONTEND_EVENT_RECORDING_STARTED ||
 	    event == OBS_FRONTEND_EVENT_RECORDING_STOPPING ||
-	    event == OBS_FRONTEND_EVENT_RECORDING_STOPPED) {
+	    event == OBS_FRONTEND_EVENT_RECORDING_STOPPED ||
+	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED ||
+	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED) {
 		obs_source_update(context->source, NULL);
 	}
 }
@@ -1008,6 +1015,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 				  OUTPUT_MODE_RECORDING);
 	obs_property_list_add_int(p, obs_module_text("StreamingOrRecording"),
 				  OUTPUT_MODE_STREAMING_OR_RECORDING);
+	obs_property_list_add_int(p, obs_module_text("VirtualCamera"),
+				  OUTPUT_MODE_VIRTUAL_CAMERA);
 
 	obs_properties_add_path(record, "path", obs_module_text("Path"),
 				OBS_PATH_DIRECTORY, NULL, NULL);
@@ -1053,6 +1062,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 				  OUTPUT_MODE_RECORDING);
 	obs_property_list_add_int(p, obs_module_text("StreamingOrRecording"),
 				  OUTPUT_MODE_STREAMING_OR_RECORDING);
+	obs_property_list_add_int(p, obs_module_text("VirtualCamera"),
+				   OUTPUT_MODE_VIRTUAL_CAMERA);
 
 	obs_properties_add_text(stream, "server", obs_module_text("Server"),
 				OBS_TEXT_DEFAULT);

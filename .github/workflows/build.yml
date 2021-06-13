@@ -8,7 +8,7 @@ on:
 
 env:
   PLUGIN_NAME: source-record
-  OBS_VERSION: 26.1.1
+  OBS_VERSION: 27.0.1
 
 jobs:
   macos64:
