@@ -723,6 +723,7 @@ static void source_record_filter_defaults(obs_data_t *settings)
 		}
 		obs_data_set_default_string(settings, "encoder", enc_id);
 	}
+	obs_data_set_default_int(settings, "replay_duration", 5);
 }
 
 static void frontend_event(enum obs_frontend_event event, void *data)
@@ -1040,7 +1041,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_properties_t *replay = obs_properties_create();
 
 	p = obs_properties_add_int(replay, "replay_duration",
-				   obs_module_text("Duration"), 0, 100, 1);
+				   obs_module_text("Duration"), 1, 100, 1);
 	obs_property_int_set_suffix(p, "s");
 
 	obs_properties_add_group(props, "replay_buffer",
@@ -1063,7 +1064,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_property_list_add_int(p, obs_module_text("StreamingOrRecording"),
 				  OUTPUT_MODE_STREAMING_OR_RECORDING);
 	obs_property_list_add_int(p, obs_module_text("VirtualCamera"),
-				   OUTPUT_MODE_VIRTUAL_CAMERA);
+				  OUTPUT_MODE_VIRTUAL_CAMERA);
 
 	obs_properties_add_text(stream, "server", obs_module_text("Server"),
 				OBS_TEXT_DEFAULT);
@@ -1109,7 +1110,6 @@ static obs_properties_t *source_record_filter_properties(void *data)
 			     OBS_ENCODER_CAP_INTERNAL)) != 0)
 			continue;
 		const char *name = obs_encoder_get_display_name(enc_id);
-		const char *codec = obs_get_encoder_codec(enc_id);
 		obs_property_list_add_string(p, name, enc_id);
 	}
 	obs_property_set_modified_callback2(p, encoder_changed, data);
