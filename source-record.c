@@ -53,7 +53,7 @@ struct video_frame {
 	uint32_t linesize[MAX_AV_PLANES];
 };
 
-bool EncoderAvailable(const char *encoder)
+static bool EncoderAvailable(const char *encoder)
 {
 	const char *val;
 	int i = 0;
@@ -107,9 +107,10 @@ static void mix_audio(obs_source_t *parent, obs_source_t *child, void *param)
 	}
 }
 
-bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
-			  uint64_t *out_ts, uint32_t mixers,
-			  struct audio_output_data *mixes)
+static bool audio_input_callback(void *param, uint64_t start_ts_in,
+				 uint64_t end_ts_in, uint64_t *out_ts,
+				 uint32_t mixers,
+				 struct audio_output_data *mixes)
 {
 	struct source_record_filter_context *filter = param;
 	if (filter->closing) {
@@ -186,7 +187,8 @@ bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in,
 	return true;
 }
 
-void source_record_filter_offscreen_render(void *data, uint32_t cx, uint32_t cy)
+static void source_record_filter_offscreen_render(void *data, uint32_t cx,
+						  uint32_t cy)
 {
 	struct source_record_filter_context *filter = data;
 	if (filter->closing)
@@ -501,6 +503,11 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 				    filter->encoder)
 				obs_output_set_video_encoder(filter->fileOutput,
 							     filter->encoder);
+			if (filter->streamOutput &&
+			    obs_output_get_video_encoder(
+				    filter->streamOutput) != filter->encoder)
+				obs_output_set_video_encoder(
+					filter->streamOutput, filter->encoder);
 			if (filter->replayOutput &&
 			    obs_output_get_video_encoder(
 				    filter->replayOutput) != filter->encoder)
@@ -923,6 +930,12 @@ static void source_record_filter_tick(void *data, float seconds)
 				       context->fileOutput);
 			context->fileOutput = NULL;
 		}
+		if (context->streamOutput) {
+			pthread_t thread;
+			pthread_create(&thread, NULL, force_stop_output_thread,
+				       context->streamOutput);
+			context->streamOutput = NULL;
+		}
 		if (context->replayOutput) {
 			pthread_t thread;
 			pthread_create(&thread, NULL, force_stop_output_thread,
@@ -955,6 +968,12 @@ static void source_record_filter_tick(void *data, float seconds)
 			pthread_create(&thread, NULL, force_stop_output_thread,
 				       context->fileOutput);
 			context->fileOutput = NULL;
+		}
+		if (context->streamOutput) {
+			pthread_t thread;
+			pthread_create(&thread, NULL, force_stop_output_thread,
+				       context->streamOutput);
+			context->streamOutput = NULL;
 		}
 		if (context->replayOutput) {
 			pthread_t thread;
@@ -1122,12 +1141,13 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	return props;
 }
 
-void source_record_filter_render(void *data, gs_effect_t *effect)
+static void source_record_filter_render(void *data, gs_effect_t *effect)
 {
 	UNUSED_PARAMETER(effect);
 	struct source_record_filter_context *context = data;
 	obs_source_skip_video_filter(context->source);
 }
+
 static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 {
 	struct source_record_filter_context *context = data;
