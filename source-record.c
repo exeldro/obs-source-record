@@ -1137,6 +1137,11 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 		obs_output_release(context->fileOutput);
 		context->fileOutput = NULL;
 	}
+	if (context->streamOutput) {
+		obs_output_force_stop(context->streamOutput);
+		obs_output_release(context->streamOutput);
+		context->streamOutput = NULL;
+	}
 	if (context->replayOutput) {
 		obs_output_force_stop(context->replayOutput);
 		obs_output_release(context->replayOutput);
