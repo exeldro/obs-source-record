@@ -113,7 +113,7 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in,
 				 struct audio_output_data *mixes)
 {
 	struct source_record_filter_context *filter = param;
-	if (filter->closing) {
+	if (filter->closing || obs_source_removed(filter->source)) {
 		*out_ts = start_ts_in;
 		return true;
 	}
@@ -126,7 +126,7 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in,
 	} else {
 		audio_source = obs_filter_get_parent(filter->source);
 	}
-	if (!audio_source) {
+	if (!audio_source || obs_source_removed(audio_source)) {
 		*out_ts = start_ts_in;
 		return true;
 	}
