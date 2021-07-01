@@ -159,12 +159,12 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in,
 		*out_ts = start_ts_in;
 		return true;
 	}
-	if (obs_source_audio_pending(audio_source))
-		return false;
 
 	const uint64_t source_ts = obs_source_get_audio_timestamp(audio_source);
-	if (!source_ts)
-		return false;
+	if (!source_ts) {
+		*out_ts = start_ts_in;
+		return true;
+	}
 
 	struct obs_source_audio_mix audio;
 	obs_source_get_audio_mix(audio_source, &audio);
