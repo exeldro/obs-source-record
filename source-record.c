@@ -382,13 +382,8 @@ static void start_file_output(struct source_record_filter_context *filter,
 
 	if (filter->aacTrack) {
 		obs_encoder_set_audio(filter->aacTrack, filter->audio_output);
-		if (filter->audio_track > 0)
-			obs_output_set_audio_encoder(filter->fileOutput,
-						     filter->aacTrack,
-						     filter->audio_track - 1);
-		else
-			obs_output_set_audio_encoder(filter->fileOutput,
-						     filter->aacTrack, 0);
+		obs_output_set_audio_encoder(filter->fileOutput,
+					     filter->aacTrack, 0);
 	}
 
 	filter->starting_file_output = true;
@@ -442,13 +437,8 @@ static void start_stream_output(struct source_record_filter_context *filter,
 
 	if (filter->aacTrack) {
 		obs_encoder_set_audio(filter->aacTrack, filter->audio_output);
-		if (filter->audio_track > 0)
-			obs_output_set_audio_encoder(filter->streamOutput,
-						     filter->aacTrack,
-						     filter->audio_track - 1);
-		else
-			obs_output_set_audio_encoder(filter->streamOutput,
-						     filter->aacTrack, 0);
+		obs_output_set_audio_encoder(filter->streamOutput,
+					     filter->aacTrack, 0);
 	}
 
 	filter->starting_stream_output = true;
@@ -491,21 +481,11 @@ static void start_replay_output(struct source_record_filter_context *filter,
 
 	if (filter->aacTrack) {
 		obs_encoder_set_audio(filter->aacTrack, filter->audio_output);
-		if (filter->audio_track > 0) {
-			if (obs_output_get_audio_encoder(filter->replayOutput,
-							 filter->audio_track -
-								 1) !=
-			    filter->aacTrack)
-				obs_output_set_audio_encoder(
-					filter->replayOutput, filter->aacTrack,
-					filter->audio_track - 1);
-		} else {
-			if (obs_output_get_audio_encoder(filter->replayOutput,
-							 0) != filter->aacTrack)
-				obs_output_set_audio_encoder(
-					filter->replayOutput, filter->aacTrack,
-					0);
-		}
+
+		if (obs_output_get_audio_encoder(filter->replayOutput, 0) !=
+		    filter->aacTrack)
+			obs_output_set_audio_encoder(filter->replayOutput,
+						     filter->aacTrack, 0);
 	}
 
 	filter->starting_replay_output = true;
@@ -608,39 +588,37 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 				int i = 0;
 			}
 		}
-		filter->audio_track = audio_track;
 
-		if (!filter->aacTrack) {
-			filter->aacTrack = obs_audio_encoder_create(
-				"ffmpeg_aac",
-				obs_source_get_name(filter->source), NULL, 0,
-				NULL);
-
+		if (!filter->aacTrack || filter->audio_track != audio_track) {
+			if (filter->aacTrack) {
+				obs_encoder_release(filter->aacTrack);
+				filter->aacTrack = NULL;
+			}
+			if (audio_track > 0) {
+				filter->aacTrack = obs_audio_encoder_create(
+					"ffmpeg_aac",
+					obs_source_get_name(filter->source),
+					NULL, audio_track - 1, NULL);
+			} else {
+				filter->aacTrack = obs_audio_encoder_create(
+					"ffmpeg_aac",
+					obs_source_get_name(filter->source),
+					NULL, 0, NULL);
+			}
 			if (filter->audio_output)
 				obs_encoder_set_audio(filter->aacTrack,
 						      filter->audio_output);
-			if (audio_track > 0) {
-				if (filter->fileOutput)
-					obs_output_set_audio_encoder(
-						filter->fileOutput,
-						filter->aacTrack,
-						audio_track - 1);
-				if (filter->replayOutput)
-					obs_output_set_audio_encoder(
-						filter->replayOutput,
-						filter->aacTrack,
-						audio_track - 1);
-			} else {
-				if (filter->fileOutput)
-					obs_output_set_audio_encoder(
-						filter->fileOutput,
-						filter->aacTrack, 0);
-				if (filter->replayOutput)
-					obs_output_set_audio_encoder(
-						filter->replayOutput,
-						filter->aacTrack, 0);
-			}
+
+			if (filter->fileOutput)
+				obs_output_set_audio_encoder(filter->fileOutput,
+							     filter->aacTrack,
+							     0);
+			if (filter->replayOutput)
+				obs_output_set_audio_encoder(
+					filter->replayOutput, filter->aacTrack,
+					0);
 		}
+		filter->audio_track = audio_track;
 	}
 	bool record = false;
 	if (record_mode == OUTPUT_MODE_ALWAYS) {
