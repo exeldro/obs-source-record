@@ -2,6 +2,10 @@
 
 Plugin for OBS Studio to make sources available to record via a filter
 
+# Download
+
+https://obsproject.com/forum/resources/source-record.1285/
+
 # Build
 - Build OBS Studio: https://obsproject.com/wiki/Install-Instructions
 - Check out this repository to plugins/source-record
