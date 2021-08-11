@@ -960,8 +960,10 @@ static void source_record_filter_tick(void *data, float seconds)
 			source_record_enable_hotkey,
 			source_record_disable_hotkey, context, context);
 
-	const uint32_t width = obs_source_get_width(parent);
-	const uint32_t height = obs_source_get_height(parent);
+	uint32_t width = obs_source_get_width(parent);
+	width += (width & 1);
+	uint32_t height = obs_source_get_height(parent);
+	height += (height & 1);
 	if (context->width != width || context->height != height ||
 	    (!context->video_output && width && height)) {
 		struct obs_video_info ovi = {0};
