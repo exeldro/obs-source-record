@@ -560,7 +560,9 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 				struct audio_output_info oi = {0};
 				oi.name = obs_source_get_name(filter->source);
 				oi.speakers = SPEAKERS_STEREO;
-				oi.samples_per_sec = 48000;
+				oi.samples_per_sec =
+					audio_output_get_sample_rate(
+						obs_get_audio());
 				oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
 				oi.input_param = filter;
 				oi.input_callback = audio_input_callback;
@@ -578,7 +580,8 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			struct audio_output_info oi = {0};
 			oi.name = obs_source_get_name(filter->source);
 			oi.speakers = SPEAKERS_STEREO;
-			oi.samples_per_sec = 48000;
+			oi.samples_per_sec =
+				audio_output_get_sample_rate(obs_get_audio());
 			oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
 			oi.input_param = filter;
 			oi.input_callback = audio_input_callback;
