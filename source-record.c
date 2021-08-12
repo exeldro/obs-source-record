@@ -554,7 +554,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 				? (int)obs_data_get_int(settings, "audio_track")
 				: 0;
 		if (!filter->audio_output) {
-			if (filter->audio_track > 0) {
+			if (audio_track > 0) {
 				filter->audio_output = obs_get_audio();
 			} else {
 				struct audio_output_info oi = {0};
