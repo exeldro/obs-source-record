@@ -805,6 +805,9 @@ static void source_record_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "replay_duration", 5);
 }
 
+static void source_record_filter_filter_remove(void *data,
+					       obs_source_t *parent);
+
 static void frontend_event(enum obs_frontend_event event, void *data)
 {
 	struct source_record_filter_context *context = data;
@@ -819,6 +822,9 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED ||
 	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED) {
 		obs_source_update(context->source, NULL);
+	} else if (event == OBS_FRONTEND_EVENT_EXIT ||
+		   event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
+		source_record_filter_filter_remove(data, NULL);
 	}
 }
 
