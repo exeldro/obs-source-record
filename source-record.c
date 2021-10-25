@@ -68,6 +68,7 @@ static bool EncoderAvailable(const char *encoder)
 
 static void calc_min_ts(obs_source_t *parent, obs_source_t *child, void *param)
 {
+	UNUSED_PARAMETER(parent);
 	uint64_t *min_ts = param;
 	if (!child || obs_source_audio_pending(child))
 		return;
@@ -80,6 +81,7 @@ static void calc_min_ts(obs_source_t *parent, obs_source_t *child, void *param)
 
 static void mix_audio(obs_source_t *parent, obs_source_t *child, void *param)
 {
+	UNUSED_PARAMETER(parent);
 	if (!child || obs_source_audio_pending(child))
 		return;
 	const uint64_t ts = obs_source_get_audio_timestamp(child);
@@ -96,7 +98,6 @@ static void mix_audio(obs_source_t *parent, obs_source_t *child, void *param)
 
 	struct obs_source_audio_mix child_audio;
 	obs_source_get_audio_mix(child, &child_audio);
-	const size_t mix_idx = 0;
 	for (size_t ch = 0; ch < mixed_audio->speakers; ch++) {
 		float *out = ((float *)mixed_audio->data[ch]) + pos;
 		float *in = child_audio.output[0].data[ch];
@@ -113,6 +114,7 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in,
 				 uint32_t mixers,
 				 struct audio_output_data *mixes)
 {
+	UNUSED_PARAMETER(end_ts_in);
 	struct source_record_filter_context *filter = param;
 	if (filter->closing || obs_source_removed(filter->source)) {
 		*out_ts = start_ts_in;
@@ -222,6 +224,8 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in,
 static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 						  uint32_t cy)
 {
+	UNUSED_PARAMETER(cx);
+	UNUSED_PARAMETER(cy);
 	struct source_record_filter_context *filter = data;
 	if (filter->closing)
 		return;
@@ -566,11 +570,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 				oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
 				oi.input_param = filter;
 				oi.input_callback = audio_input_callback;
-				const int r = audio_output_open(
-					&filter->audio_output, &oi);
-				if (r != AUDIO_OUTPUT_SUCCESS) {
-					int i = 0;
-				}
+				audio_output_open(&filter->audio_output, &oi);
 			}
 		} else if (audio_track > 0 && filter->audio_track <= 0) {
 			audio_output_close(filter->audio_output);
@@ -585,11 +585,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
 			oi.input_param = filter;
 			oi.input_callback = audio_input_callback;
-			const int r =
-				audio_output_open(&filter->audio_output, &oi);
-			if (r != AUDIO_OUTPUT_SUCCESS) {
-				int i = 0;
-			}
+			audio_output_open(&filter->audio_output, &oi);
 		}
 
 		if (!filter->aacTrack || filter->audio_track != audio_track) {
@@ -909,6 +905,9 @@ static void source_record_filter_destroy(void *data)
 static void save_replay(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
 			bool pressed)
 {
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	UNUSED_PARAMETER(pressed);
 	struct source_record_filter_context *context = data;
 	if (!context || !context->replayOutput)
 		return;
@@ -922,6 +921,8 @@ static void save_replay(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
 static bool source_record_enable_hotkey(void *data, obs_hotkey_pair_id id,
 					obs_hotkey_t *hotkey, bool pressed)
 {
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
 	struct source_record_filter_context *context = data;
 	if (!pressed)
 		return false;
@@ -936,6 +937,8 @@ static bool source_record_enable_hotkey(void *data, obs_hotkey_pair_id id,
 static bool source_record_disable_hotkey(void *data, obs_hotkey_pair_id id,
 					 obs_hotkey_t *hotkey, bool pressed)
 {
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
 	struct source_record_filter_context *context = data;
 	if (!pressed)
 		return false;
@@ -947,6 +950,7 @@ static bool source_record_disable_hotkey(void *data, obs_hotkey_pair_id id,
 
 static void source_record_filter_tick(void *data, float seconds)
 {
+	UNUSED_PARAMETER(seconds);
 	struct source_record_filter_context *context = data;
 	if (context->closing)
 		return;
@@ -1070,7 +1074,9 @@ static void source_record_filter_tick(void *data, float seconds)
 static bool encoder_changed(void *data, obs_properties_t *props,
 			    obs_property_t *property, obs_data_t *settings)
 {
-	struct source_record_filter_context *context = data;
+	UNUSED_PARAMETER(data);
+	UNUSED_PARAMETER(property);
+	UNUSED_PARAMETER(settings);
 	obs_properties_remove_by_name(props, "encoder_group");
 	const char *enc_id = get_encoder_id(settings);
 	obs_properties_t *enc_props = obs_get_encoder_properties(enc_id);
@@ -1098,7 +1104,6 @@ static bool list_add_audio_sources(void *data, obs_source_t *source)
 
 static obs_properties_t *source_record_filter_properties(void *data)
 {
-	struct source_record_filter_context *s = data;
 	obs_properties_t *props = obs_properties_create();
 
 	obs_properties_t *record = obs_properties_create();
@@ -1243,6 +1248,7 @@ static void source_record_filter_render(void *data, gs_effect_t *effect)
 
 static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 {
+	UNUSED_PARAMETER(parent);
 	struct source_record_filter_context *context = data;
 	context->closing = true;
 	if (context->fileOutput) {
