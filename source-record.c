@@ -21,6 +21,7 @@ struct source_record_filter_context {
 	bool output_active;
 	uint32_t width;
 	uint32_t height;
+	uint64_t last_frame_time_ns;
 	gs_texrender_t *texrender;
 	gs_stagesurf_t *stagesurface;
 	bool starting_file_output;
@@ -227,6 +228,15 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 	UNUSED_PARAMETER(cx);
 	UNUSED_PARAMETER(cy);
 	struct source_record_filter_context *filter = data;
+
+	uint64_t frame_time_ns = obs_get_video_frame_time();
+	int count = (int)((frame_time_ns - filter->last_frame_time_ns) /
+			  obs_get_frame_interval_ns());
+	filter->last_frame_time_ns = frame_time_ns;
+
+	if (!count)
+		return;
+
 	if (filter->closing)
 		return;
 	if (!obs_source_enabled(filter->source))
@@ -264,8 +274,8 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 	gs_texrender_end(filter->texrender);
 
 	struct video_frame output_frame;
-	if (!video_output_lock_frame(filter->video_output, &output_frame, 1,
-				     obs_get_video_frame_time()))
+	if (!video_output_lock_frame(filter->video_output, &output_frame, count,
+				     frame_time_ns))
 		return;
 
 	if (gs_stagesurface_get_width(filter->stagesurface) != filter->width ||
