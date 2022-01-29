@@ -1,5 +1,5 @@
 #include <obs-module.h>
-#include <../UI/obs-frontend-api/obs-frontend-api.h>
+#include <obs-frontend-api.h>
 #include <util/config-file.h>
 #include <util/platform.h>
 #include <util/threading.h>
@@ -229,9 +229,12 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 	UNUSED_PARAMETER(cy);
 	struct source_record_filter_context *filter = data;
 
-	uint64_t frame_time_ns = obs_get_video_frame_time();
-	int count = (int)((frame_time_ns - filter->last_frame_time_ns) /
-			  obs_get_frame_interval_ns());
+	const uint64_t frame_time_ns = obs_get_video_frame_time();
+	const int count =
+		filter->last_frame_time_ns
+			? (int)((frame_time_ns - filter->last_frame_time_ns) /
+				  obs_get_frame_interval_ns())
+			: 1;
 	filter->last_frame_time_ns = frame_time_ns;
 
 	if (!count)
