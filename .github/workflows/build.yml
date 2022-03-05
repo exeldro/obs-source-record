@@ -79,7 +79,7 @@ jobs:
         run: |
           curl -L -O http://s.sudre.free.fr/Software/files/Packages.dmg
           sudo hdiutil attach ./Packages.dmg
-          sudo installer -pkg /Volumes/Packages\ 1.2.9/Install\ Packages.pkg -target /
+          sudo installer -pkg /Volumes/Packages\ 1.2.10/Install\ Packages.pkg -target /
       - name: Package
         if: success()
         shell: bash
@@ -197,7 +197,7 @@ jobs:
     runs-on: [windows-latest]
     env:
       QT_VERSION: '5.15.2'
-      CMAKE_GENERATOR: "Visual Studio 16 2019"
+      CMAKE_GENERATOR: "Visual Studio 17 2022"
       CMAKE_SYSTEM_VERSION: "10.0.18363.657"
       WINDOWS_DEPS_VERSION: '2019'
     steps:

@@ -4,6 +4,7 @@
 #include <util/platform.h>
 #include <util/threading.h>
 #include "version.h"
+#include "util/dstr.h"
 
 #define OUTPUT_MODE_NONE 0
 #define OUTPUT_MODE_ALWAYS 1
@@ -37,7 +38,6 @@ struct source_record_filter_context {
 	bool record;
 	bool stream;
 	bool replayBuffer;
-	obs_hotkey_id replayHotkey;
 	obs_hotkey_pair_id enableHotkey;
 	int audio_track;
 	obs_weak_source_t *audio_source;
@@ -483,9 +483,23 @@ static void start_replay_output(struct source_record_filter_context *filter,
 	obs_data_set_int(s, "max_time_sec", filter->replay_buffer_duration);
 	obs_data_set_int(s, "max_size_mb", 10000);
 	if (!filter->replayOutput) {
+		obs_data_t *hotkeys =
+			obs_data_get_obj(settings, "replay_hotkeys");
+		struct dstr name;
+		obs_source_t *parent = obs_filter_get_parent(filter->source);
+		if (parent) {
+			dstr_init_copy(&name, obs_source_get_name(parent));
+			dstr_cat(&name, " - ");
+			dstr_cat(&name, obs_source_get_name(filter->source));
+		} else {
+			dstr_init_copy(&name,
+				       obs_source_get_name(filter->source));
+		}
+
 		filter->replayOutput = obs_output_create(
-			"replay_buffer", obs_source_get_name(filter->source), s,
-			NULL);
+			"replay_buffer", name.array, s, hotkeys);
+		dstr_free(&name);
+		obs_data_release(hotkeys);
 	} else {
 		obs_output_update(filter->replayOutput, s);
 	}
@@ -671,6 +685,10 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			    filter->video_output)
 				start_replay_output(filter, settings);
 		} else if (filter->replayOutput) {
+			obs_data_t *hotkeys =
+				obs_hotkeys_save_output(filter->replayOutput);
+			obs_data_set_obj(settings, "replay_hotkeys", hotkeys);
+			obs_data_release(hotkeys);
 			pthread_t thread;
 			pthread_create(&thread, NULL, force_stop_output_thread,
 				       filter->replayOutput);
@@ -682,6 +700,10 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		   obs_source_enabled(filter->source)) {
 		if (filter->replay_buffer_duration !=
 		    obs_data_get_int(settings, "replay_duration")) {
+			obs_data_t *hotkeys =
+				obs_hotkeys_save_output(filter->replayOutput);
+			obs_data_set_obj(settings, "replay_hotkeys", hotkeys);
+			obs_data_release(hotkeys);
 			pthread_t thread;
 			pthread_create(&thread, NULL, force_stop_output_thread,
 				       filter->replayOutput);
@@ -769,6 +791,17 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	}
 }
 
+static void source_record_filter_save(void *data, obs_data_t *settings)
+{
+	struct source_record_filter_context *filter = data;
+	if (filter->replayOutput) {
+		obs_data_t *hotkeys =
+			obs_hotkeys_save_output(filter->replayOutput);
+		obs_data_set_obj(settings, "replay_hotkeys", hotkeys);
+		obs_data_release(hotkeys);
+	}
+}
+
 static void source_record_filter_defaults(obs_data_t *settings)
 {
 	config_t *config = obs_frontend_get_profile_config();
@@ -842,7 +875,7 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 		obs_source_update(context->source, NULL);
 	} else if (event == OBS_FRONTEND_EVENT_EXIT ||
 		   event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
-		source_record_filter_filter_remove(data, NULL);
+		context->closing = true;
 	}
 }
 
@@ -854,7 +887,6 @@ static void *source_record_filter_create(obs_data_t *settings,
 	context->source = source;
 
 	context->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
-	context->replayHotkey = OBS_INVALID_HOTKEY_ID;
 	context->enableHotkey = OBS_INVALID_HOTKEY_PAIR_ID;
 	source_record_filter_update(context, settings);
 	obs_add_main_render_callback(source_record_filter_offscreen_render,
@@ -893,8 +925,6 @@ static void source_record_filter_destroy(void *data)
 
 	video_output_stop(context->video_output);
 
-	if (context->replayHotkey != OBS_INVALID_HOTKEY_ID)
-		obs_hotkey_unregister(context->replayHotkey);
 	if (context->enableHotkey != OBS_INVALID_HOTKEY_PAIR_ID)
 		obs_hotkey_pair_unregister(context->enableHotkey);
 
@@ -922,22 +952,6 @@ static void source_record_filter_destroy(void *data)
 
 	obs_leave_graphics();
 	bfree(context);
-}
-
-static void save_replay(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
-			bool pressed)
-{
-	UNUSED_PARAMETER(id);
-	UNUSED_PARAMETER(hotkey);
-	UNUSED_PARAMETER(pressed);
-	struct source_record_filter_context *context = data;
-	if (!context || !context->replayOutput)
-		return;
-	calldata_t cd = {0};
-	proc_handler_t *ph = obs_output_get_proc_handler(context->replayOutput);
-	if (ph)
-		proc_handler_call(ph, "save", &cd);
-	calldata_free(&cd);
 }
 
 static bool source_record_enable_hotkey(void *data, obs_hotkey_pair_id id,
@@ -980,11 +994,6 @@ static void source_record_filter_tick(void *data, float seconds)
 	obs_source_t *parent = obs_filter_get_parent(context->source);
 	if (!parent)
 		return;
-
-	if (context->replayHotkey == OBS_INVALID_HOTKEY_ID)
-		context->replayHotkey = obs_hotkey_register_source(
-			parent, "save_replay", obs_module_text("SaveReplay"),
-			save_replay, context);
 
 	if (context->enableHotkey == OBS_INVALID_HOTKEY_PAIR_ID)
 		context->enableHotkey = obs_hotkey_pair_register_source(
@@ -1168,7 +1177,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_properties_t *replay = obs_properties_create();
 
 	p = obs_properties_add_int(replay, "replay_duration",
-				   obs_module_text("Duration"), 1, 100, 1);
+				   obs_module_text("Duration"), 1, 1000, 1);
 	obs_property_int_set_suffix(p, "s");
 
 	obs_properties_add_group(props, "replay_buffer",
@@ -1302,6 +1311,7 @@ struct obs_source_info source_record_filter_info = {
 	.destroy = source_record_filter_destroy,
 	.update = source_record_filter_update,
 	.load = source_record_filter_update,
+	.save = source_record_filter_save,
 	.get_defaults = source_record_filter_defaults,
 	.video_render = source_record_filter_render,
 	.video_tick = source_record_filter_tick,
