@@ -42,6 +42,7 @@ struct source_record_filter_context {
 	int audio_track;
 	obs_weak_source_t *audio_source;
 	bool closing;
+	long long replay_buffer_duration;
 };
 
 static const char *source_record_filter_get_name(void *unused)
@@ -233,7 +234,7 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 	const int count =
 		filter->last_frame_time_ns
 			? (int)((frame_time_ns - filter->last_frame_time_ns) /
-				  obs_get_frame_interval_ns())
+				obs_get_frame_interval_ns())
 			: 1;
 	filter->last_frame_time_ns = frame_time_ns;
 
@@ -477,8 +478,9 @@ static void start_replay_output(struct source_record_filter_context *filter,
 	obs_data_set_string(s, "extension",
 			    obs_data_get_string(settings, "rec_format"));
 	obs_data_set_bool(s, "allow_spaces", true);
-	obs_data_set_int(s, "max_time_sec",
-			 obs_data_get_int(settings, "replay_duration"));
+	filter->replay_buffer_duration =
+		obs_data_get_int(settings, "replay_duration");
+	obs_data_set_int(s, "max_time_sec", filter->replay_buffer_duration);
 	obs_data_set_int(s, "max_size_mb", 10000);
 	if (!filter->replayOutput) {
 		filter->replayOutput = obs_output_create(
@@ -668,17 +670,24 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			if (obs_source_enabled(filter->source) &&
 			    filter->video_output)
 				start_replay_output(filter, settings);
-		} else {
-			if (filter->replayOutput) {
-				pthread_t thread;
-				pthread_create(&thread, NULL,
-					       force_stop_output_thread,
-					       filter->replayOutput);
-				filter->replayOutput = NULL;
-			}
+		} else if (filter->replayOutput) {
+			pthread_t thread;
+			pthread_create(&thread, NULL, force_stop_output_thread,
+				       filter->replayOutput);
+			filter->replayOutput = NULL;
 		}
 
 		filter->replayBuffer = replay_buffer;
+	} else if (replay_buffer && filter->replayOutput &&
+		   obs_source_enabled(filter->source)) {
+		if (filter->replay_buffer_duration !=
+		    obs_data_get_int(settings, "replay_duration")) {
+			pthread_t thread;
+			pthread_create(&thread, NULL, force_stop_output_thread,
+				       filter->replayOutput);
+			filter->replayOutput = NULL;
+			start_replay_output(filter, settings);
+		}
 	}
 
 	bool stream = false;

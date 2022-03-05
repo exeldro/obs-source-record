@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.12..4.0)
 
-project(source-record VERSION 0.2.7)
+project(source-record VERSION 0.2.8)
 set(PROJECT_FULL_NAME "Source Record")
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.h.in ${CMAKE_CURRENT_SOURCE_DIR}/version.h)
