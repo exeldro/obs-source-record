@@ -379,10 +379,12 @@ static void start_file_output(struct source_record_filter_context *filter,
 {
 	obs_data_t *s = obs_data_create();
 	char path[512];
+	char *filename = os_generate_formatted_filename(
+		obs_data_get_string(settings, "rec_format"), true,
+		obs_data_get_string(settings, "filename_formatting"));
 	snprintf(path, 512, "%s/%s", obs_data_get_string(settings, "path"),
-		 os_generate_formatted_filename(
-			 obs_data_get_string(settings, "rec_format"), true,
-			 obs_data_get_string(settings, "filename_formatting")));
+		 filename);
+	bfree(filename);
 	obs_data_set_string(s, "path", path);
 	if (!filter->fileOutput) {
 		filter->fileOutput = obs_output_create(
