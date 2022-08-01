@@ -374,6 +374,27 @@ static void *start_replay_thread(void *data)
 	return NULL;
 }
 
+static void ensure_directory(char *path)
+{
+#ifdef _WIN32
+	char *backslash = strrchr(path, '\\');
+	if (backslash)
+		*backslash = '/';
+#endif
+
+	char *slash = strrchr(path, '/');
+	if (slash) {
+		*slash = 0;
+		os_mkdirs(path);
+		*slash = '/';
+	}
+
+#ifdef _WIN32
+	if (backslash)
+		*backslash = '\\';
+#endif
+}
+
 static void start_file_output(struct source_record_filter_context *filter,
 			      obs_data_t *settings)
 {
@@ -385,6 +406,7 @@ static void start_file_output(struct source_record_filter_context *filter,
 	snprintf(path, 512, "%s/%s", obs_data_get_string(settings, "path"),
 		 filename);
 	bfree(filename);
+	ensure_directory(path);
 	obs_data_set_string(s, "path", path);
 	if (!filter->fileOutput) {
 		filter->fileOutput = obs_output_create(
