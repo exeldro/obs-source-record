@@ -305,20 +305,40 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 	}
 
 	if (filter->video_data && filter->video_linesize) {
-		const uint32_t linesize = output_frame.linesize[0];
-		if (filter->video_linesize == linesize) {
-			memcpy(output_frame.data[0], filter->video_data,
-			       linesize * filter->height);
-		} else {
-			for (uint32_t i = 0; i < filter->height; ++i) {
-				const uint32_t dst_offset = linesize * i;
-				const uint32_t src_offset =
-					filter->video_linesize * i;
-				memcpy(output_frame.data[0] + dst_offset,
-				       filter->video_data + src_offset,
-				       linesize);
-			}
-		}
+        for (size_t i = 0; i < filter->height; ++i) {
+            const size_t dst_offset = output_frame.linesize[0] * i;
+            const size_t src_offset =
+                    filter->video_linesize * i;
+            for (int j = 0; j < output_frame.linesize[0]; ++j) {
+                const unsigned int B = filter->video_data[0 + j * 4 + src_offset];
+                const unsigned int G = filter->video_data[1 + j * 4 + src_offset];
+                const unsigned int R = filter->video_data[2 + j * 4 + src_offset];
+                const unsigned int Y = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
+                output_frame.data[0][j + dst_offset] = (uint8_t)Y;
+            }
+        }
+        for (size_t i = 0; i < filter->height; i += 2) {
+            const size_t dst_offset = output_frame.linesize[1] * i / 2;
+            const size_t src_offset1 =
+                    filter->video_linesize * i;
+            const size_t src_offset2 =
+                    src_offset1 + filter->video_linesize;
+            for (size_t j = 0; j < output_frame.linesize[1]; j += 2) {
+                const unsigned int B1 = filter->video_data[0 + j * 4 + src_offset1];
+                const unsigned int G1 = filter->video_data[1 + j * 4 + src_offset1];
+                const unsigned int R1 = filter->video_data[2 + j * 4 + src_offset1];
+                const unsigned int B2 = filter->video_data[0 + j * 4 + src_offset2];
+                const unsigned int G2 = filter->video_data[1 + j * 4 + src_offset2];
+                const unsigned int R2 = filter->video_data[2 + j * 4 + src_offset2];
+                const unsigned int B = (B1 + B2) / 2;
+                const unsigned int G = (G1 + G2) / 2;
+                const unsigned int R = (R1 + R2) / 2;
+                const unsigned int U = ( ( -38 * R -  74 * G + 112 * B + 128) >> 8) + 128;
+                const unsigned int V = ( ( 112 * R -  94 * G -  18 * B + 128) >> 8) + 128;
+                output_frame.data[1][0 + j + dst_offset] = (uint8_t)U;
+                output_frame.data[1][1 + j + dst_offset] = (uint8_t)V;
+            }
+        }
 	}
 
 	video_output_unlock_frame(filter->video_output);
@@ -1038,7 +1058,7 @@ static void source_record_filter_tick(void *data, float seconds)
 		obs_get_video_info(&ovi);
 
 		struct video_output_info vi = {0};
-		vi.format = VIDEO_FORMAT_BGRA;
+		vi.format = VIDEO_FORMAT_NV12;
 		vi.width = width;
 		vi.height = height;
 		vi.fps_den = ovi.fps_den;
