@@ -305,40 +305,40 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 	}
 
 	if (filter->video_data && filter->video_linesize) {
-        for (size_t i = 0; i < filter->height; ++i) {
-            const size_t dst_offset = output_frame.linesize[0] * i;
-            const size_t src_offset =
-                    filter->video_linesize * i;
-            for (int j = 0; j < output_frame.linesize[0]; ++j) {
-                const unsigned int B = filter->video_data[0 + j * 4 + src_offset];
-                const unsigned int G = filter->video_data[1 + j * 4 + src_offset];
-                const unsigned int R = filter->video_data[2 + j * 4 + src_offset];
-                const unsigned int Y = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
-                output_frame.data[0][j + dst_offset] = (uint8_t)Y;
-            }
-        }
-        for (size_t i = 0; i < filter->height; i += 2) {
-            const size_t dst_offset = output_frame.linesize[1] * i / 2;
-            const size_t src_offset1 =
-                    filter->video_linesize * i;
-            const size_t src_offset2 =
-                    src_offset1 + filter->video_linesize;
-            for (size_t j = 0; j < output_frame.linesize[1]; j += 2) {
-                const unsigned int B1 = filter->video_data[0 + j * 4 + src_offset1];
-                const unsigned int G1 = filter->video_data[1 + j * 4 + src_offset1];
-                const unsigned int R1 = filter->video_data[2 + j * 4 + src_offset1];
-                const unsigned int B2 = filter->video_data[0 + j * 4 + src_offset2];
-                const unsigned int G2 = filter->video_data[1 + j * 4 + src_offset2];
-                const unsigned int R2 = filter->video_data[2 + j * 4 + src_offset2];
-                const unsigned int B = (B1 + B2) / 2;
-                const unsigned int G = (G1 + G2) / 2;
-                const unsigned int R = (R1 + R2) / 2;
-                const unsigned int U = ( ( -38 * R -  74 * G + 112 * B + 128) >> 8) + 128;
-                const unsigned int V = ( ( 112 * R -  94 * G -  18 * B + 128) >> 8) + 128;
-                output_frame.data[1][0 + j + dst_offset] = (uint8_t)U;
-                output_frame.data[1][1 + j + dst_offset] = (uint8_t)V;
-            }
-        }
+		for (size_t i = 0; i < filter->height; ++i) {
+			const size_t dst_offset = output_frame.linesize[0] * i;
+			const size_t src_offset =
+					filter->video_linesize * i;
+			for (int j = 0; j < output_frame.linesize[0]; ++j) {
+				const unsigned int B = filter->video_data[0 + j * 4 + src_offset];
+				const unsigned int G = filter->video_data[1 + j * 4 + src_offset];
+				const unsigned int R = filter->video_data[2 + j * 4 + src_offset];
+				const unsigned int Y = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
+				output_frame.data[0][j + dst_offset] = (uint8_t)Y;
+			}
+		}
+		for (size_t i = 0; i < filter->height; i += 2) {
+			const size_t dst_offset = output_frame.linesize[1] * i / 2;
+			const size_t src_offset1 =
+					filter->video_linesize * i;
+			const size_t src_offset2 =
+					src_offset1 + filter->video_linesize;
+			for (size_t j = 0; j < output_frame.linesize[1]; j += 2) {
+				const unsigned int B1 = filter->video_data[0 + j * 4 + src_offset1];
+				const unsigned int G1 = filter->video_data[1 + j * 4 + src_offset1];
+				const unsigned int R1 = filter->video_data[2 + j * 4 + src_offset1];
+				const unsigned int B2 = filter->video_data[0 + j * 4 + src_offset2];
+				const unsigned int G2 = filter->video_data[1 + j * 4 + src_offset2];
+				const unsigned int R2 = filter->video_data[2 + j * 4 + src_offset2];
+				const unsigned int B = (B1 + B2) / 2;
+				const unsigned int G = (G1 + G2) / 2;
+				const unsigned int R = (R1 + R2) / 2;
+				const unsigned int U = ( ( -38 * R -  74 * G + 112 * B + 128) >> 8) + 128;
+				const unsigned int V = ( ( 112 * R -  94 * G -  18 * B + 128) >> 8) + 128;
+				output_frame.data[1][0 + j + dst_offset] = (uint8_t)U;
+				output_frame.data[1][1 + j + dst_offset] = (uint8_t)V;
+			}
+		}
 	}
 
 	video_output_unlock_frame(filter->video_output);
