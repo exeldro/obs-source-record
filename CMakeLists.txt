@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.12..4.0)
 
 project(source-record VERSION 0.3.0)
 set(PROJECT_FULL_NAME "Source Record")
+set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${CMAKE_SOURCE_DIR}/cmake")
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.h.in ${CMAKE_CURRENT_SOURCE_DIR}/version.h)
 
@@ -34,12 +35,19 @@ if(BUILD_OUT_OF_TREE)
     find_package(LibObs REQUIRED)
 endif()
 
+include_directories(
+	${LIBOBS_INCLUDE_DIR}/../UI/obs-frontend-api
+    ${LIBOBS_INCLUDE_DIR}
+    ${LIBOBS_INCLUDE_DIRS}
+)
+
+link_directories(${LIBOBS_LIBRARIES})
 add_library(source-record MODULE
 	${source-record_HEADERS}
 	${source-record_SOURCES})
 target_link_libraries(source-record
+	obs
 	obs-frontend-api
-	libobs
 	${source-record_PLATFORM_DEPS})
 
 if(BUILD_OUT_OF_TREE)
