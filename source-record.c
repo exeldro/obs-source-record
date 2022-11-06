@@ -351,9 +351,9 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 					const uint32_t dst_offset = linesize * i;
 					const uint32_t src_offset =
 					filter->video_linesize * i;
-				memcpy(output_frame.data[0] + dst_offset,
-				       filter->video_data + src_offset,
-				       linesize);
+					memcpy(output_frame.data[0] + dst_offset,
+					       filter->video_data + src_offset,
+					       linesize);
 				}
 			}
 		}
