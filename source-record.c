@@ -311,7 +311,7 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 				const size_t dst_offset = output_frame.linesize[0] * i;
 				const size_t src_offset =
 						filter->video_linesize * i;
-				for (int j = 0; j < output_frame.linesize[0]; ++j) {
+				for (size_t j = 0; j < output_frame.linesize[0]; ++j) {
 					const unsigned int B = filter->video_data[0 + j * 4 + src_offset];
 					const unsigned int G = filter->video_data[1 + j * 4 + src_offset];
 					const unsigned int R = filter->video_data[2 + j * 4 + src_offset];
@@ -641,7 +641,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	if (record_mode != OUTPUT_MODE_NONE ||
 	    stream_mode != OUTPUT_MODE_NONE || replay_buffer) {
 		const char *enc_id = get_encoder_id(settings);
-		data->nv12_required = is_nv12_required(enc_id);
+		filter->nv12_required = is_nv12_required(enc_id);
 		if (!filter->encoder ||
 		    strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
 			obs_encoder_release(filter->encoder);
