@@ -43,6 +43,7 @@ struct source_record_filter_context {
 	obs_weak_source_t *audio_source;
 	bool closing;
 	long long replay_buffer_duration;
+	bool nv12_required;
 };
 
 static const char *source_record_filter_get_name(void *unused)
@@ -305,38 +306,55 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 	}
 
 	if (filter->video_data && filter->video_linesize) {
-		for (size_t i = 0; i < filter->height; ++i) {
-			const size_t dst_offset = output_frame.linesize[0] * i;
-			const size_t src_offset =
-					filter->video_linesize * i;
-			for (int j = 0; j < output_frame.linesize[0]; ++j) {
-				const unsigned int B = filter->video_data[0 + j * 4 + src_offset];
-				const unsigned int G = filter->video_data[1 + j * 4 + src_offset];
-				const unsigned int R = filter->video_data[2 + j * 4 + src_offset];
-				const unsigned int Y = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
-				output_frame.data[0][j + dst_offset] = (uint8_t)Y;
+		if (filter->nv12_required) {
+			for (size_t i = 0; i < filter->height; ++i) {
+				const size_t dst_offset = output_frame.linesize[0] * i;
+				const size_t src_offset =
+						filter->video_linesize * i;
+				for (int j = 0; j < output_frame.linesize[0]; ++j) {
+					const unsigned int B = filter->video_data[0 + j * 4 + src_offset];
+					const unsigned int G = filter->video_data[1 + j * 4 + src_offset];
+					const unsigned int R = filter->video_data[2 + j * 4 + src_offset];
+					const unsigned int Y = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
+					output_frame.data[0][j + dst_offset] = (uint8_t)Y;
+				}
 			}
-		}
-		for (size_t i = 0; i < filter->height; i += 2) {
-			const size_t dst_offset = output_frame.linesize[1] * i / 2;
-			const size_t src_offset1 =
+			for (size_t i = 0; i < filter->height; i += 2) {
+				const size_t dst_offset = output_frame.linesize[1] * i / 2;
+				const size_t src_offset1 =
+						filter->video_linesize * i;
+				const size_t src_offset2 =
+						src_offset1 + filter->video_linesize;
+				for (size_t j = 0; j < output_frame.linesize[1]; j += 2) {
+					const unsigned int B1 = filter->video_data[0 + j * 4 + src_offset1];
+					const unsigned int G1 = filter->video_data[1 + j * 4 + src_offset1];
+					const unsigned int R1 = filter->video_data[2 + j * 4 + src_offset1];
+					const unsigned int B2 = filter->video_data[0 + j * 4 + src_offset2];
+					const unsigned int G2 = filter->video_data[1 + j * 4 + src_offset2];
+					const unsigned int R2 = filter->video_data[2 + j * 4 + src_offset2];
+					const unsigned int B = (B1 + B2) / 2;
+					const unsigned int G = (G1 + G2) / 2;
+					const unsigned int R = (R1 + R2) / 2;
+					const unsigned int U = ( ( -38 * R -  74 * G + 112 * B + 128) >> 8) + 128;
+					const unsigned int V = ( ( 112 * R -  94 * G -  18 * B + 128) >> 8) + 128;
+					output_frame.data[1][0 + j + dst_offset] = (uint8_t)U;
+					output_frame.data[1][1 + j + dst_offset] = (uint8_t)V;
+				}
+			}
+		} else {
+			const uint32_t linesize = output_frame.linesize[0];
+			if (filter->video_linesize == linesize) {
+				memcpy(output_frame.data[0], filter->video_data,
+				linesize * filter->height);
+			} else {
+				for (uint32_t i = 0; i < filter->height; ++i) {
+					const uint32_t dst_offset = linesize * i;
+					const uint32_t src_offset =
 					filter->video_linesize * i;
-			const size_t src_offset2 =
-					src_offset1 + filter->video_linesize;
-			for (size_t j = 0; j < output_frame.linesize[1]; j += 2) {
-				const unsigned int B1 = filter->video_data[0 + j * 4 + src_offset1];
-				const unsigned int G1 = filter->video_data[1 + j * 4 + src_offset1];
-				const unsigned int R1 = filter->video_data[2 + j * 4 + src_offset1];
-				const unsigned int B2 = filter->video_data[0 + j * 4 + src_offset2];
-				const unsigned int G2 = filter->video_data[1 + j * 4 + src_offset2];
-				const unsigned int R2 = filter->video_data[2 + j * 4 + src_offset2];
-				const unsigned int B = (B1 + B2) / 2;
-				const unsigned int G = (G1 + G2) / 2;
-				const unsigned int R = (R1 + R2) / 2;
-				const unsigned int U = ( ( -38 * R -  74 * G + 112 * B + 128) >> 8) + 128;
-				const unsigned int V = ( ( 112 * R -  94 * G -  18 * B + 128) >> 8) + 128;
-				output_frame.data[1][0 + j + dst_offset] = (uint8_t)U;
-				output_frame.data[1][1 + j + dst_offset] = (uint8_t)V;
+				memcpy(output_frame.data[0] + dst_offset,
+				       filter->video_data + src_offset,
+				       linesize);
+				}
 			}
 		}
 	}
@@ -588,6 +606,31 @@ static const char *get_encoder_id(obs_data_t *settings)
 	return enc_id;
 }
 
+static bool is_nv12_required(const char *enc_id)
+{
+	if (strcmp("com.apple.videotoolbox.videoencoder.prores-422", enc_id) == 0) {
+		// Apple VT ProRes Software Encoder
+		return true;
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.appleproreshw.422", enc_id) == 0) {
+		// Apple VT ProRes Hardware Encoder
+		return true;
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.h264", enc_id) == 0) {
+		// Apple VT H264 Software Encoder
+		return true;
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.ave.avc", enc_id) == 0) {
+		// Apple VT H264 Hardware Encoder
+		return true;
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.hevc.vcp", enc_id) == 0) {
+		// Apple VT HEVC Software Encoder
+		return true;
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.ave.hevc", enc_id) == 0) {
+		// Apple VT HEVC Hardware Encoder
+		return true;
+	} else {
+		return false;
+	}
+}
+
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
@@ -598,6 +641,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	if (record_mode != OUTPUT_MODE_NONE ||
 	    stream_mode != OUTPUT_MODE_NONE || replay_buffer) {
 		const char *enc_id = get_encoder_id(settings);
+		data->nv12_required = is_nv12_required(enc_id);
 		if (!filter->encoder ||
 		    strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
 			obs_encoder_release(filter->encoder);
@@ -1058,7 +1102,11 @@ static void source_record_filter_tick(void *data, float seconds)
 		obs_get_video_info(&ovi);
 
 		struct video_output_info vi = {0};
-		vi.format = VIDEO_FORMAT_NV12;
+		if (context->nv12_required) {
+			vi.format = VIDEO_FORMAT_NV12;
+		} else {
+			vi.format = VIDEO_FORMAT_BGRA;
+		}
 		vi.width = width;
 		vi.height = height;
 		vi.fps_den = ovi.fps_den;
