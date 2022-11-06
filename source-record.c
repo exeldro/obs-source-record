@@ -91,8 +91,8 @@ static void mix_audio(obs_source_t *parent, obs_source_t *child, void *param)
 	if (!ts)
 		return;
 	struct obs_source_audio *mixed_audio = param;
-	const size_t pos = ns_to_audio_frames(mixed_audio->samples_per_sec,
-					      ts - mixed_audio->timestamp);
+	const size_t pos = (size_t)ns_to_audio_frames(
+		mixed_audio->samples_per_sec, ts - mixed_audio->timestamp);
 
 	if (pos > AUDIO_OUTPUT_FRAMES)
 		return;
@@ -101,7 +101,7 @@ static void mix_audio(obs_source_t *parent, obs_source_t *child, void *param)
 
 	struct obs_source_audio_mix child_audio;
 	obs_source_get_audio_mix(child, &child_audio);
-	for (size_t ch = 0; ch < mixed_audio->speakers; ch++) {
+	for (size_t ch = 0; ch < (size_t)mixed_audio->speakers; ch++) {
 		float *out = ((float *)mixed_audio->data[ch]) + pos;
 		float *in = child_audio.output[0].data[ch];
 		if (!in)
@@ -161,8 +161,8 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in,
 				if ((mixers & (1 << mix_idx)) == 0)
 					continue;
 				// clamp audio
-				for (size_t ch = 0; ch < mixed_audio.speakers;
-				     ch++) {
+				for (size_t ch = 0;
+				     ch < (size_t)mixed_audio.speakers; ch++) {
 					float *mix_data =
 						mixes[mix_idx].data[ch];
 					float *mix_end =
