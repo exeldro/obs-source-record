@@ -265,10 +265,7 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 		return;
 
 	struct vec4 background;
-	background.x = (double)(filter->backgroundColor & 0xff) / 255.0;
-	background.y = (double)((filter->backgroundColor >> 8) & 0xff) / 255.0;
-	background.z = (double)((filter->backgroundColor >> 16) & 0xff) / 255.0;
-	background.w = 0.0;
+	vec4_from_rgba(&background, filter->backgroundColor);
 
 	gs_clear(GS_CLEAR_COLOR, &background, 0.0f, 0);
 	gs_ortho(0.0f, (float)filter->width, 0.0f, (float)filter->height,
@@ -920,6 +917,8 @@ static void source_record_filter_defaults(obs_data_t *settings)
 		settings, "rec_format",
 		config_get_string(config, adv_out ? "AdvOut" : "SimpleOutput",
 				  "RecFormat"));
+
+	obs_data_set_default_int(settings, "backgroundColor", 0);
 
 	const char *enc_id;
 	if (adv_out) {
