@@ -44,6 +44,7 @@ struct source_record_filter_context {
 	bool closing;
 	long long replay_buffer_duration;
 	bool nv12_required;
+	struct vec4 backgroundColor;
 };
 
 static const char *source_record_filter_get_name(void *unused)
@@ -263,10 +264,7 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 				filter->height))
 		return;
 
-	struct vec4 background;
-	vec4_zero(&background);
-
-	gs_clear(GS_CLEAR_COLOR, &background, 0.0f, 0);
+	gs_clear(GS_CLEAR_COLOR, &filter->backgroundColor, 0.0f, 0);
 	gs_ortho(0.0f, (float)filter->width, 0.0f, (float)filter->height,
 		 -100.0f, 100.0f);
 
@@ -308,50 +306,91 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 	if (filter->video_data && filter->video_linesize) {
 		if (filter->nv12_required) {
 			for (size_t i = 0; i < filter->height; ++i) {
-				const size_t dst_offset = output_frame.linesize[0] * i;
+				const size_t dst_offset =
+					output_frame.linesize[0] * i;
 				const size_t src_offset =
-						filter->video_linesize * i;
-				for (size_t j = 0; j < output_frame.linesize[0]; ++j) {
-					const unsigned int B = filter->video_data[0 + j * 4 + src_offset];
-					const unsigned int G = filter->video_data[1 + j * 4 + src_offset];
-					const unsigned int R = filter->video_data[2 + j * 4 + src_offset];
-					const unsigned int Y = ((66 * R + 129 * G + 25 * B + 128) >> 8) + 16;
-					output_frame.data[0][j + dst_offset] = (uint8_t)Y;
+					filter->video_linesize * i;
+				for (size_t j = 0; j < output_frame.linesize[0];
+				     ++j) {
+					const unsigned int B =
+						filter->video_data[0 + j * 4 +
+								   src_offset];
+					const unsigned int G =
+						filter->video_data[1 + j * 4 +
+								   src_offset];
+					const unsigned int R =
+						filter->video_data[2 + j * 4 +
+								   src_offset];
+					const unsigned int Y =
+						((66 * R + 129 * G + 25 * B +
+						  128) >>
+						 8) +
+						16;
+					output_frame.data[0][j + dst_offset] =
+						(uint8_t)Y;
 				}
 			}
 			for (size_t i = 0; i < filter->height; i += 2) {
-				const size_t dst_offset = output_frame.linesize[1] * i / 2;
+				const size_t dst_offset =
+					output_frame.linesize[1] * i / 2;
 				const size_t src_offset1 =
-						filter->video_linesize * i;
+					filter->video_linesize * i;
 				const size_t src_offset2 =
-						src_offset1 + filter->video_linesize;
-				for (size_t j = 0; j < output_frame.linesize[1]; j += 2) {
-					const unsigned int B1 = filter->video_data[0 + j * 4 + src_offset1];
-					const unsigned int G1 = filter->video_data[1 + j * 4 + src_offset1];
-					const unsigned int R1 = filter->video_data[2 + j * 4 + src_offset1];
-					const unsigned int B2 = filter->video_data[0 + j * 4 + src_offset2];
-					const unsigned int G2 = filter->video_data[1 + j * 4 + src_offset2];
-					const unsigned int R2 = filter->video_data[2 + j * 4 + src_offset2];
+					src_offset1 + filter->video_linesize;
+				for (size_t j = 0; j < output_frame.linesize[1];
+				     j += 2) {
+					const unsigned int B1 =
+						filter->video_data[0 + j * 4 +
+								   src_offset1];
+					const unsigned int G1 =
+						filter->video_data[1 + j * 4 +
+								   src_offset1];
+					const unsigned int R1 =
+						filter->video_data[2 + j * 4 +
+								   src_offset1];
+					const unsigned int B2 =
+						filter->video_data[0 + j * 4 +
+								   src_offset2];
+					const unsigned int G2 =
+						filter->video_data[1 + j * 4 +
+								   src_offset2];
+					const unsigned int R2 =
+						filter->video_data[2 + j * 4 +
+								   src_offset2];
 					const unsigned int B = (B1 + B2) / 2;
 					const unsigned int G = (G1 + G2) / 2;
 					const unsigned int R = (R1 + R2) / 2;
-					const unsigned int U = ( ( -38 * R -  74 * G + 112 * B + 128) >> 8) + 128;
-					const unsigned int V = ( ( 112 * R -  94 * G -  18 * B + 128) >> 8) + 128;
-					output_frame.data[1][0 + j + dst_offset] = (uint8_t)U;
-					output_frame.data[1][1 + j + dst_offset] = (uint8_t)V;
+					const unsigned int U =
+						((-38 * R - 74 * G + 112 * B +
+						  128) >>
+						 8) +
+						128;
+					const unsigned int V =
+						((112 * R - 94 * G - 18 * B +
+						  128) >>
+						 8) +
+						128;
+					output_frame
+						.data[1][0 + j + dst_offset] =
+						(uint8_t)U;
+					output_frame
+						.data[1][1 + j + dst_offset] =
+						(uint8_t)V;
 				}
 			}
 		} else {
 			const uint32_t linesize = output_frame.linesize[0];
 			if (filter->video_linesize == linesize) {
 				memcpy(output_frame.data[0], filter->video_data,
-				linesize * filter->height);
+				       linesize * filter->height);
 			} else {
 				for (uint32_t i = 0; i < filter->height; ++i) {
-					const uint32_t dst_offset = linesize * i;
+					const uint32_t dst_offset =
+						linesize * i;
 					const uint32_t src_offset =
-					filter->video_linesize * i;
-					memcpy(output_frame.data[0] + dst_offset,
+						filter->video_linesize * i;
+					memcpy(output_frame.data[0] +
+						       dst_offset,
 					       filter->video_data + src_offset,
 					       linesize);
 				}
@@ -608,22 +647,28 @@ static const char *get_encoder_id(obs_data_t *settings)
 
 static bool is_nv12_required(const char *enc_id)
 {
-	if (strcmp("com.apple.videotoolbox.videoencoder.prores-422", enc_id) == 0) {
+	if (strcmp("com.apple.videotoolbox.videoencoder.prores-422", enc_id) ==
+	    0) {
 		// Apple VT ProRes Software Encoder
 		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.appleproreshw.422", enc_id) == 0) {
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.appleproreshw.422",
+			  enc_id) == 0) {
 		// Apple VT ProRes Hardware Encoder
 		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.h264", enc_id) == 0) {
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.h264", enc_id) ==
+		   0) {
 		// Apple VT H264 Software Encoder
 		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.ave.avc", enc_id) == 0) {
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.ave.avc",
+			  enc_id) == 0) {
 		// Apple VT H264 Hardware Encoder
 		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.hevc.vcp", enc_id) == 0) {
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.hevc.vcp",
+			  enc_id) == 0) {
 		// Apple VT HEVC Software Encoder
 		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.ave.hevc", enc_id) == 0) {
+	} else if (strcmp("com.apple.videotoolbox.videoencoder.ave.hevc",
+			  enc_id) == 0) {
 		// Apple VT HEVC Hardware Encoder
 		return true;
 	} else {
@@ -842,6 +887,9 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		}
 	}
 
+	vec4_from_rgba(&filter->backgroundColor,
+		       (uint32_t)obs_data_get_int(settings, "backgroundColor"));
+
 	if (obs_data_get_bool(settings, "different_audio")) {
 		const char *source_name =
 			obs_data_get_string(settings, "audio_source");
@@ -914,6 +962,8 @@ static void source_record_filter_defaults(obs_data_t *settings)
 		settings, "rec_format",
 		config_get_string(config, adv_out ? "AdvOut" : "SimpleOutput",
 				  "RecFormat"));
+
+	obs_data_set_default_int(settings, "backgroundColor", 0);
 
 	const char *enc_id;
 	if (adv_out) {
@@ -1301,6 +1351,15 @@ static obs_properties_t *source_record_filter_properties(void *data)
 
 	obs_properties_add_group(props, "stream", obs_module_text("Stream"),
 				 OBS_GROUP_NORMAL, stream);
+
+	obs_properties_t *background = obs_properties_create();
+
+	obs_properties_add_color(background, "backgroundColor",
+				 obs_module_text("BackgroundColor"));
+
+	obs_properties_add_group(props, "background",
+				 obs_module_text("Background"),
+				 OBS_GROUP_NORMAL, background);
 
 	obs_properties_t *audio = obs_properties_create();
 
