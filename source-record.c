@@ -1309,7 +1309,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 
 	obs_properties_t *background = obs_properties_create();
 
-	obs_properties_add_color(background, "backgroundColor", obs_module_text("Background Color"));
+	obs_properties_add_color(background, "backgroundColor", obs_module_text("BackgroundColor"));
 
 	obs_properties_add_group(props, "background",
 				 obs_module_text("Background"),
