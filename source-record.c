@@ -44,7 +44,7 @@ struct source_record_filter_context {
 	bool closing;
 	long long replay_buffer_duration;
 	bool nv12_required;
-	uint64_t backgroundColor;
+	struct vec4 backgroundColor;
 };
 
 static const char *source_record_filter_get_name(void *unused)
@@ -264,10 +264,7 @@ static void source_record_filter_offscreen_render(void *data, uint32_t cx,
 				filter->height))
 		return;
 
-	struct vec4 background;
-	vec4_from_rgba(&background, filter->backgroundColor);
-
-	gs_clear(GS_CLEAR_COLOR, &background, 0.0f, 0);
+	gs_clear(GS_CLEAR_COLOR, &filter->backgroundColor, 0.0f, 0);
 	gs_ortho(0.0f, (float)filter->width, 0.0f, (float)filter->height,
 		 -100.0f, 100.0f);
 
@@ -843,7 +840,8 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		}
 	}
 
-	filter->backgroundColor = obs_data_get_int(settings, "backgroundColor");
+	vec4_from_rgba(&filter->backgroundColor,
+		       (uint32_t)obs_data_get_int(settings, "backgroundColor"));
 
 	if (obs_data_get_bool(settings, "different_audio")) {
 		const char *source_name =
@@ -1309,7 +1307,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 
 	obs_properties_t *background = obs_properties_create();
 
-	obs_properties_add_color(background, "backgroundColor", obs_module_text("BackgroundColor"));
+	obs_properties_add_color(background, "backgroundColor",
+				 obs_module_text("BackgroundColor"));
 
 	obs_properties_add_group(props, "background",
 				 obs_module_text("Background"),
