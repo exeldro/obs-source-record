@@ -42,7 +42,6 @@ struct source_record_filter_context {
 	obs_weak_source_t *audio_source;
 	bool closing;
 	long long replay_buffer_duration;
-	bool nv12_required;
 	struct vec4 backgroundColor;
 };
 
@@ -454,49 +453,34 @@ static void start_replay_output(struct source_record_filter_context *filter,
 static const char *get_encoder_id(obs_data_t *settings)
 {
 	const char *enc_id = obs_data_get_string(settings, "encoder");
-	if (strcmp(enc_id, "qsv") == 0) {
-		enc_id = "obs_qsv11";
-	} else if (strcmp(enc_id, "amd") == 0) {
-		enc_id = "amd_amf_h264";
-	} else if (strcmp(enc_id, "nvenc") == 0) {
-		//enc_id = EncoderAvailable("jim_nvenc") ? "jim_nvenc" : "ffmpeg_nvenc";
-		enc_id = "ffmpeg_nvenc";
-	} else if (strcmp(enc_id, "x264") == 0 ||
-		   strcmp(enc_id, "x264_lowcpu") == 0) {
+	if (strlen(enc_id) == 0 || strcmp(enc_id, "x264") == 0 ||
+	    strcmp(enc_id, "x264_lowcpu") == 0) {
 		enc_id = "obs_x264";
+	} else if (strcmp(enc_id, "qsv") == 0) {
+		enc_id = "obs_qsv11_v2";
+	} else if (strcmp(enc_id, "qsv_av1") == 0) {
+		enc_id = "obs_qsv11_av1";
+	} else if (strcmp(enc_id, "amd") == 0) {
+		enc_id = "h264_texture_amf";
+	} else if (strcmp(enc_id, "amd_hevc") == 0) {
+		enc_id = "h265_texture_amf";
+	} else if (strcmp(enc_id, "amd_av1") == 0) {
+		enc_id = "av1_texture_amf";
+	} else if (strcmp(enc_id, "nvenc") == 0) {
+		enc_id = EncoderAvailable("jim_nvenc") ? "jim_nvenc"
+						       : "ffmpeg_nvenc";
+	} else if (strcmp(enc_id, "nvenc_hevc") == 0) {
+		enc_id = EncoderAvailable("jim_hevc_nvenc")
+				 ? "jim_hevc_nvenc"
+				 : "ffmpeg_hevc_nvenc";
+	} else if (strcmp(enc_id, "nvenc_av1") == 0) {
+		enc_id = "jim_av1_nvenc";
+	} else if (strcmp(enc_id, "apple_h264") == 0) {
+		enc_id = "com.apple.videotoolbox.videoencoder.ave.avc";
+	} else if (strcmp(enc_id, "apple_hevc") == 0) {
+		enc_id = "com.apple.videotoolbox.videoencoder.ave.hevc";
 	}
 	return enc_id;
-}
-
-static bool is_nv12_required(const char *enc_id)
-{
-	if (strcmp("com.apple.videotoolbox.videoencoder.prores-422", enc_id) ==
-	    0) {
-		// Apple VT ProRes Software Encoder
-		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.appleproreshw.422",
-			  enc_id) == 0) {
-		// Apple VT ProRes Hardware Encoder
-		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.h264", enc_id) ==
-		   0) {
-		// Apple VT H264 Software Encoder
-		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.ave.avc",
-			  enc_id) == 0) {
-		// Apple VT H264 Hardware Encoder
-		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.hevc.vcp",
-			  enc_id) == 0) {
-		// Apple VT HEVC Software Encoder
-		return true;
-	} else if (strcmp("com.apple.videotoolbox.videoencoder.ave.hevc",
-			  enc_id) == 0) {
-		// Apple VT HEVC Hardware Encoder
-		return true;
-	} else {
-		return false;
-	}
 }
 
 static void source_record_filter_update(void *data, obs_data_t *settings)
@@ -509,7 +493,6 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	if (record_mode != OUTPUT_MODE_NONE ||
 	    stream_mode != OUTPUT_MODE_NONE || replay_buffer) {
 		const char *enc_id = get_encoder_id(settings);
-		filter->nv12_required = is_nv12_required(enc_id);
 		if (!filter->encoder ||
 		    strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
 			obs_encoder_release(filter->encoder);
@@ -1197,12 +1180,35 @@ static obs_properties_t *source_record_filter_properties(void *data)
 
 	obs_property_list_add_string(p, obs_module_text("Software"), "x264");
 	if (EncoderAvailable("obs_qsv11"))
-		obs_property_list_add_string(p, obs_module_text("QSV"), "qsv");
+		obs_property_list_add_string(p, obs_module_text("QSV.H264"),
+					     "qsv");
+	if (EncoderAvailable("obs_qsv11_av1"))
+		obs_property_list_add_string(p, obs_module_text("QSV.AV1"),
+					     "qsv_av1");
 	if (EncoderAvailable("ffmpeg_nvenc"))
-		obs_property_list_add_string(p, obs_module_text("NVENC"),
+		obs_property_list_add_string(p, obs_module_text("NVENC.H264"),
 					     "nvenc");
-	if (EncoderAvailable("amd_amf_h264"))
-		obs_property_list_add_string(p, obs_module_text("AMD"), "amd");
+	if (EncoderAvailable("jim_av1_nvenc"))
+		obs_property_list_add_string(p, obs_module_text("NVENC.AV1"),
+					     "nvenc_av1");
+	if (EncoderAvailable("h265_texture_amf"))
+		obs_property_list_add_string(p, obs_module_text("AMD.HEVC"),
+					     "amd_hevc");
+	if (EncoderAvailable("ffmpeg_hevc_nvenc"))
+		obs_property_list_add_string(p, obs_module_text("NVENC.HEVC"),
+					     "nvenc_hevc");
+	if (EncoderAvailable("h264_texture_amf"))
+		obs_property_list_add_string(p, obs_module_text("AMD.H264"),
+					     "amd");
+	if (EncoderAvailable("av1_texture_amf"))
+		obs_property_list_add_string(p, obs_module_text("AMD.AV1"),
+					     "amd_av1");
+	if (EncoderAvailable("com.apple.videotoolbox.videoencoder.ave.avc"))
+		obs_property_list_add_string(p, obs_module_text("Apple.H264"),
+					     "apple_h264");
+	if (EncoderAvailable("com.apple.videotoolbox.videoencoder.ave.hevc"))
+		obs_property_list_add_string(p, obs_module_text("Apple.HEVC"),
+					     "apple_hevc");
 
 	const char *enc_id = NULL;
 	size_t i = 0;
