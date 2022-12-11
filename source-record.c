@@ -23,8 +23,7 @@ struct source_record_filter_context {
 	uint32_t width;
 	uint32_t height;
 	uint64_t last_frame_time_ns;
-	gs_texrender_t *texrender;
-	gs_stagesurf_t *stagesurface;
+	obs_view_t *view;
 	bool starting_file_output;
 	bool starting_stream_output;
 	bool starting_replay_output;
@@ -223,182 +222,6 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in,
 	*out_ts = source_ts;
 
 	return true;
-}
-
-static void source_record_filter_offscreen_render(void *data, uint32_t cx,
-						  uint32_t cy)
-{
-	UNUSED_PARAMETER(cx);
-	UNUSED_PARAMETER(cy);
-	struct source_record_filter_context *filter = data;
-
-	const uint64_t frame_time_ns = obs_get_video_frame_time();
-	const int count =
-		filter->last_frame_time_ns
-			? (int)((frame_time_ns - filter->last_frame_time_ns) /
-				obs_get_frame_interval_ns())
-			: 1;
-	filter->last_frame_time_ns = frame_time_ns;
-
-	if (!count)
-		return;
-
-	if (filter->closing)
-		return;
-	if (!obs_source_enabled(filter->source))
-		return;
-
-	obs_source_t *parent = obs_filter_get_parent(filter->source);
-	if (!parent)
-		return;
-
-	if (!filter->width || !filter->height)
-		return;
-
-	if (!filter->video_output || video_output_stopped(filter->video_output))
-		return;
-
-	gs_texrender_reset(filter->texrender);
-
-	if (!gs_texrender_begin(filter->texrender, filter->width,
-				filter->height))
-		return;
-
-	gs_clear(GS_CLEAR_COLOR, &filter->backgroundColor, 0.0f, 0);
-	gs_ortho(0.0f, (float)filter->width, 0.0f, (float)filter->height,
-		 -100.0f, 100.0f);
-
-	gs_blend_state_push();
-	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
-
-	obs_source_video_render(parent);
-
-	gs_blend_state_pop();
-	gs_texrender_end(filter->texrender);
-
-	struct video_frame output_frame;
-	if (!video_output_lock_frame(filter->video_output, &output_frame, count,
-				     frame_time_ns))
-		return;
-
-	if (gs_stagesurface_get_width(filter->stagesurface) != filter->width ||
-	    gs_stagesurface_get_height(filter->stagesurface) !=
-		    filter->height) {
-		gs_stagesurface_destroy(filter->stagesurface);
-		filter->stagesurface = NULL;
-	}
-	if (filter->video_data) {
-		gs_stagesurface_unmap(filter->stagesurface);
-		filter->video_data = NULL;
-	}
-	if (!filter->stagesurface)
-		filter->stagesurface = gs_stagesurface_create(
-			filter->width, filter->height, GS_BGRA);
-
-	gs_stage_texture(filter->stagesurface,
-			 gs_texrender_get_texture(filter->texrender));
-	if (!gs_stagesurface_map(filter->stagesurface, &filter->video_data,
-				 &filter->video_linesize)) {
-		video_output_unlock_frame(filter->video_output);
-		return;
-	}
-
-	if (filter->video_data && filter->video_linesize) {
-		if (filter->nv12_required) {
-			for (size_t i = 0; i < filter->height; ++i) {
-				const size_t dst_offset =
-					output_frame.linesize[0] * i;
-				const size_t src_offset =
-					filter->video_linesize * i;
-				for (size_t j = 0; j < output_frame.linesize[0];
-				     ++j) {
-					const unsigned int B =
-						filter->video_data[0 + j * 4 +
-								   src_offset];
-					const unsigned int G =
-						filter->video_data[1 + j * 4 +
-								   src_offset];
-					const unsigned int R =
-						filter->video_data[2 + j * 4 +
-								   src_offset];
-					const unsigned int Y =
-						((66 * R + 129 * G + 25 * B +
-						  128) >>
-						 8) +
-						16;
-					output_frame.data[0][j + dst_offset] =
-						(uint8_t)Y;
-				}
-			}
-			for (size_t i = 0; i < filter->height; i += 2) {
-				const size_t dst_offset =
-					output_frame.linesize[1] * i / 2;
-				const size_t src_offset1 =
-					filter->video_linesize * i;
-				const size_t src_offset2 =
-					src_offset1 + filter->video_linesize;
-				for (size_t j = 0; j < output_frame.linesize[1];
-				     j += 2) {
-					const unsigned int B1 =
-						filter->video_data[0 + j * 4 +
-								   src_offset1];
-					const unsigned int G1 =
-						filter->video_data[1 + j * 4 +
-								   src_offset1];
-					const unsigned int R1 =
-						filter->video_data[2 + j * 4 +
-								   src_offset1];
-					const unsigned int B2 =
-						filter->video_data[0 + j * 4 +
-								   src_offset2];
-					const unsigned int G2 =
-						filter->video_data[1 + j * 4 +
-								   src_offset2];
-					const unsigned int R2 =
-						filter->video_data[2 + j * 4 +
-								   src_offset2];
-					const unsigned int B = (B1 + B2) / 2;
-					const unsigned int G = (G1 + G2) / 2;
-					const unsigned int R = (R1 + R2) / 2;
-					const unsigned int U =
-						((-38 * R - 74 * G + 112 * B +
-						  128) >>
-						 8) +
-						128;
-					const unsigned int V =
-						((112 * R - 94 * G - 18 * B +
-						  128) >>
-						 8) +
-						128;
-					output_frame
-						.data[1][0 + j + dst_offset] =
-						(uint8_t)U;
-					output_frame
-						.data[1][1 + j + dst_offset] =
-						(uint8_t)V;
-				}
-			}
-		} else {
-			const uint32_t linesize = output_frame.linesize[0];
-			if (filter->video_linesize == linesize) {
-				memcpy(output_frame.data[0], filter->video_data,
-				       linesize * filter->height);
-			} else {
-				for (uint32_t i = 0; i < filter->height; ++i) {
-					const uint32_t dst_offset =
-						linesize * i;
-					const uint32_t src_offset =
-						filter->video_linesize * i;
-					memcpy(output_frame.data[0] +
-						       dst_offset,
-					       filter->video_data + src_offset,
-					       linesize);
-				}
-			}
-		}
-	}
-
-	video_output_unlock_frame(filter->video_output);
 }
 
 static void *start_file_output_thread(void *data)
@@ -1024,11 +847,8 @@ static void *source_record_filter_create(obs_data_t *settings,
 		bzalloc(sizeof(struct source_record_filter_context));
 	context->source = source;
 
-	context->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
 	context->enableHotkey = OBS_INVALID_HOTKEY_PAIR_ID;
 	source_record_filter_update(context, settings);
-	obs_add_main_render_callback(source_record_filter_offscreen_render,
-				     context);
 	obs_frontend_add_event_callback(frontend_event, context);
 	return context;
 }
@@ -1042,8 +862,6 @@ static void source_record_filter_destroy(void *data)
 		context->output_active = false;
 	}
 	obs_frontend_remove_event_callback(frontend_event, context);
-	obs_remove_main_render_callback(source_record_filter_offscreen_render,
-					context);
 
 	if (context->fileOutput) {
 		obs_output_force_stop(context->fileOutput);
@@ -1061,13 +879,14 @@ static void source_record_filter_destroy(void *data)
 		context->replayOutput = NULL;
 	}
 
-	video_output_stop(context->video_output);
+	if (context->video_output) {
+		obs_view_remove(context->view);
+		obs_view_set_source(context->view, 0, NULL);
+		context->video_output = NULL;
+	}
 
 	if (context->enableHotkey != OBS_INVALID_HOTKEY_PAIR_ID)
 		obs_hotkey_pair_unregister(context->enableHotkey);
-
-	video_t *o = context->video_output;
-	context->video_output = NULL;
 
 	obs_encoder_release(context->aacTrack);
 	obs_encoder_release(context->encoder);
@@ -1078,17 +897,10 @@ static void source_record_filter_destroy(void *data)
 	if (context->audio_track <= 0)
 		audio_output_close(context->audio_output);
 
-	video_output_close(o);
-
 	obs_service_release(context->service);
 
-	obs_enter_graphics();
+	obs_view_destroy(context->view);
 
-	gs_stagesurface_unmap(context->stagesurface);
-	gs_stagesurface_destroy(context->stagesurface);
-	gs_texrender_destroy(context->texrender);
-
-	obs_leave_graphics();
 	bfree(context);
 }
 
@@ -1151,32 +963,25 @@ static void source_record_filter_tick(void *data, float seconds)
 		struct obs_video_info ovi = {0};
 		obs_get_video_info(&ovi);
 
-		struct video_output_info vi = {0};
-		if (context->nv12_required) {
-			vi.format = VIDEO_FORMAT_NV12;
-		} else {
-			vi.format = VIDEO_FORMAT_BGRA;
-		}
-		vi.width = width;
-		vi.height = height;
-		vi.fps_den = ovi.fps_den;
-		vi.fps_num = ovi.fps_num;
-		vi.cache_size = 16;
-		vi.colorspace = VIDEO_CS_DEFAULT;
-		vi.range = VIDEO_RANGE_DEFAULT;
-		vi.name = obs_source_get_name(context->source);
+		ovi.base_width = width;
+		ovi.base_height = height;
+		ovi.output_width = width;
+		ovi.output_height = height;
 
-		video_t *o = context->video_output;
-		context->video_output = NULL;
-		if (o) {
-			video_output_stop(o);
-			video_output_close(o);
-		}
-		if (video_output_open(&context->video_output, &vi) ==
-		    VIDEO_OUTPUT_SUCCESS) {
+		if (!context->view)
+			context->view = obs_view_create();
+
+		const bool restart = !!context->video_output;
+		if (restart)
+			obs_view_remove(context->view);
+
+		obs_view_set_source(context->view, 0, parent);
+
+		context->video_output = obs_view_add2(context->view, &ovi);
+		if (context->video_output) {
 			context->width = width;
 			context->height = height;
-			if (o)
+			if (restart)
 				context->restart = true;
 		}
 	}
@@ -1449,8 +1254,6 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 		context->replayOutput = NULL;
 	}
 	obs_frontend_remove_event_callback(frontend_event, context);
-	obs_remove_main_render_callback(source_record_filter_offscreen_render,
-					context);
 }
 
 struct obs_source_info source_record_filter_info = {
