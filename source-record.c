@@ -1039,6 +1039,7 @@ static bool encoder_changed(void *data, obs_properties_t *props,
 	UNUSED_PARAMETER(property);
 	UNUSED_PARAMETER(settings);
 	obs_properties_remove_by_name(props, "encoder_group");
+	obs_properties_remove_by_name(props, "plugin_info");
 	const char *enc_id = get_encoder_id(settings);
 	obs_properties_t *enc_props = obs_get_encoder_properties(enc_id);
 	if (enc_props) {
@@ -1046,6 +1047,11 @@ static bool encoder_changed(void *data, obs_properties_t *props,
 					 obs_encoder_get_display_name(enc_id),
 					 OBS_GROUP_NORMAL, enc_props);
 	}
+	obs_properties_add_text(
+		props, "plugin_info",
+		"<a href=\"https://obsproject.com/forum/resources/source-record.1285/\">Source Record</a> (" PROJECT_VERSION
+		") by <a href=\"https://www.exeldro.com\">Exeldro</a>",
+		OBS_TEXT_INFO);
 	return true;
 }
 
