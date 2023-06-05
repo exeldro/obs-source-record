@@ -1040,8 +1040,6 @@ static bool encoder_changed(void *data, obs_properties_t *props,
 	UNUSED_PARAMETER(data);
 	UNUSED_PARAMETER(property);
 	UNUSED_PARAMETER(settings);
-	obs_properties_remove_by_name(props, "encoder_group");
-	obs_properties_remove_by_name(props, "plugin_info");
 	const char *enc_id = get_encoder_id(settings);
 	obs_properties_t *enc_props = obs_get_encoder_properties(enc_id);
 	if (enc_props) {
@@ -1231,11 +1229,6 @@ static obs_properties_t *source_record_filter_properties(void *data)
 		obs_property_list_add_string(p, name, enc_id);
 	}
 	obs_property_set_modified_callback2(p, encoder_changed, data);
-
-	obs_properties_t *group = obs_properties_create();
-	obs_properties_add_group(props, "encoder_group",
-				 obs_module_text("Encoder"), OBS_GROUP_NORMAL,
-				 group);
 
 	return props;
 }
