@@ -251,11 +251,10 @@ static void *start_stream_output_thread(void *data)
 	return NULL;
 }
 
-static void *force_stop_output_thread(void *data)
+static void *force_stop_output(obs_output_t *output)
 {
-	obs_output_t *fileOutput = data;
-	obs_output_force_stop(fileOutput);
-	obs_output_release(fileOutput);
+	obs_output_force_stop(output);
+	obs_output_release(output);
 	return NULL;
 }
 
@@ -610,10 +609,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 				start_file_output(filter, settings);
 		} else {
 			if (filter->fileOutput) {
-				pthread_t thread;
-				pthread_create(&thread, NULL,
-					       force_stop_output_thread,
-					       filter->fileOutput);
+				force_stop_output(filter->fileOutput);
 				filter->fileOutput = NULL;
 			}
 		}
@@ -630,9 +626,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 				obs_hotkeys_save_output(filter->replayOutput);
 			obs_data_set_obj(settings, "replay_hotkeys", hotkeys);
 			obs_data_release(hotkeys);
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       filter->replayOutput);
+			force_stop_output(filter->replayOutput);
 			filter->replayOutput = NULL;
 		}
 
@@ -645,9 +639,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 				obs_hotkeys_save_output(filter->replayOutput);
 			obs_data_set_obj(settings, "replay_hotkeys", hotkeys);
 			obs_data_release(hotkeys);
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       filter->replayOutput);
+			force_stop_output(filter->replayOutput);
 			filter->replayOutput = NULL;
 			start_replay_output(filter, settings);
 		}
@@ -674,10 +666,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 				start_stream_output(filter, settings);
 		} else {
 			if (filter->streamOutput) {
-				pthread_t thread;
-				pthread_create(&thread, NULL,
-					       force_stop_output_thread,
-					       filter->streamOutput);
+				force_stop_output(filter->streamOutput);
 				filter->streamOutput = NULL;
 			}
 		}
@@ -973,21 +962,18 @@ static void source_record_filter_tick(void *data, float seconds)
 
 	if (context->restart && context->output_active) {
 		if (context->fileOutput) {
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       context->fileOutput);
+			obs_output_force_stop(context->fileOutput);
+			obs_output_release(context->fileOutput);
 			context->fileOutput = NULL;
 		}
 		if (context->streamOutput) {
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       context->streamOutput);
+			obs_output_force_stop(context->streamOutput);
+			obs_output_release(context->streamOutput);
 			context->streamOutput = NULL;
 		}
 		if (context->replayOutput) {
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       context->replayOutput);
+			obs_output_force_stop(context->replayOutput);
+			obs_output_release(context->replayOutput);
 			context->replayOutput = NULL;
 		}
 		context->output_active = false;
@@ -1012,21 +998,15 @@ static void source_record_filter_tick(void *data, float seconds)
 	} else if (context->output_active &&
 		   !obs_source_enabled(context->source)) {
 		if (context->fileOutput) {
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       context->fileOutput);
+			force_stop_output(context->fileOutput);
 			context->fileOutput = NULL;
 		}
 		if (context->streamOutput) {
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       context->streamOutput);
+			force_stop_output(context->streamOutput);
 			context->streamOutput = NULL;
 		}
 		if (context->replayOutput) {
-			pthread_t thread;
-			pthread_create(&thread, NULL, force_stop_output_thread,
-				       context->replayOutput);
+			force_stop_output(context->replayOutput);
 			context->replayOutput = NULL;
 		}
 		context->output_active = false;
