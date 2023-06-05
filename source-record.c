@@ -348,10 +348,12 @@ static void start_stream_output(struct source_record_filter_context *filter,
 	}
 	obs_service_apply_encoder_settings(filter->service, settings, NULL);
 
-	const char *type = obs_service_get_output_type(filter->service);
+	const char *type =
+		obs_service_get_preferred_output_type(filter->service);
 	if (!type) {
 		type = "rtmp_output";
-		const char *url = obs_service_get_url(filter->service);
+		const char *url = obs_service_get_connect_info(
+			filter->service, OBS_SERVICE_CONNECT_INFO_SERVER_URL);
 		if (url != NULL &&
 		    strncmp(url, FTL_PROTOCOL, strlen(FTL_PROTOCOL)) == 0) {
 			type = "ftl_output";
