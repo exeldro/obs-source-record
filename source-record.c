@@ -3,8 +3,9 @@
 #include <util/config-file.h>
 #include <util/platform.h>
 #include <util/threading.h>
+#include <util/dstr.h>
 #include "version.h"
-#include "util/dstr.h"
+#include "obs-websocket-api.h"
 
 #define OUTPUT_MODE_NONE 0
 #define OUTPUT_MODE_ALWAYS 1
@@ -15,8 +16,6 @@
 
 struct source_record_filter_context {
 	obs_source_t *source;
-	uint8_t *video_data;
-	uint32_t video_linesize;
 	video_t *video_output;
 	audio_t *audio_output;
 	bool output_active;
@@ -43,6 +42,8 @@ struct source_record_filter_context {
 	bool closing;
 	long long replay_buffer_duration;
 	struct vec4 backgroundColor;
+	bool remove_after_record;
+	long long record_max_seconds;
 };
 
 static const char *source_record_filter_get_name(void *unused)
@@ -294,6 +295,21 @@ static void ensure_directory(char *path)
 #endif
 }
 
+static void remove_filter(void *data, calldata_t *calldata)
+{
+	UNUSED_PARAMETER(calldata);
+	struct source_record_filter_context *filter = data;
+	signal_handler_t *sh =
+		obs_output_get_signal_handler(filter->fileOutput);
+	signal_handler_disconnect(sh, "stop", remove_filter, filter);
+	obs_source_t *source = obs_filter_get_parent(filter->source);
+	if (!source && filter->view) {
+		source = obs_view_get_source(filter->view, 0);
+		obs_source_release(source);
+	}
+	obs_source_filter_remove(source, filter->source);
+}
+
 static void start_file_output(struct source_record_filter_context *filter,
 			      obs_data_t *settings)
 {
@@ -311,6 +327,12 @@ static void start_file_output(struct source_record_filter_context *filter,
 		filter->fileOutput = obs_output_create(
 			"ffmpeg_muxer", obs_source_get_name(filter->source), s,
 			NULL);
+		if (filter->remove_after_record) {
+			signal_handler_t *sh = obs_output_get_signal_handler(
+				filter->fileOutput);
+			signal_handler_connect(sh, "stop", remove_filter,
+					       filter);
+		}
 	} else {
 		obs_output_update(filter->fileOutput, s);
 	}
@@ -431,6 +453,12 @@ static void start_replay_output(struct source_record_filter_context *filter,
 
 		filter->replayOutput = obs_output_create(
 			"replay_buffer", name.array, s, hotkeys);
+		if (filter->remove_after_record) {
+			signal_handler_t *sh = obs_output_get_signal_handler(
+				filter->replayOutput);
+			signal_handler_connect(sh, "stop", remove_filter,
+					       filter);
+		}
 		dstr_free(&name);
 		obs_data_release(hotkeys);
 	} else {
@@ -496,12 +524,18 @@ static const char *get_encoder_id(obs_data_t *settings)
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
-
+	filter->remove_after_record =
+		obs_data_get_bool(settings, "remove_after_record");
+	filter->record_max_seconds =
+		obs_data_get_int(settings, "record_max_seconds");
 	const long long record_mode = obs_data_get_int(settings, "record_mode");
 	const long long stream_mode = obs_data_get_int(settings, "stream_mode");
-	const bool replay_buffer = obs_data_get_bool(settings, "replay_buffer");
-	if (record_mode != OUTPUT_MODE_NONE ||
-	    stream_mode != OUTPUT_MODE_NONE || replay_buffer) {
+	const bool replay_buffer =
+		obs_data_get_bool(settings, "replay_buffer") &&
+		!filter->closing;
+	if (!filter->closing &&
+	    (record_mode != OUTPUT_MODE_NONE ||
+	     stream_mode != OUTPUT_MODE_NONE || replay_buffer)) {
 		const char *enc_id = get_encoder_id(settings);
 		if (!filter->encoder ||
 		    strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
@@ -598,7 +632,8 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		filter->audio_track = audio_track;
 	}
 	bool record = false;
-	if (record_mode == OUTPUT_MODE_ALWAYS) {
+	if (filter->closing) {
+	} else if (record_mode == OUTPUT_MODE_ALWAYS) {
 		record = true;
 	} else if (record_mode == OUTPUT_MODE_RECORDING) {
 		record = obs_frontend_recording_active();
@@ -662,7 +697,8 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	}
 
 	bool stream = false;
-	if (stream_mode == OUTPUT_MODE_ALWAYS) {
+	if (filter->closing) {
+	} else if (stream_mode == OUTPUT_MODE_ALWAYS) {
 		stream = true;
 	} else if (stream_mode == OUTPUT_MODE_RECORDING) {
 		stream = obs_frontend_recording_active();
@@ -884,6 +920,8 @@ static void source_record_filter_destroy(void *data)
 	obs_encoder_release(context->aacTrack);
 	obs_encoder_release(context->encoder);
 
+	os_sleep_ms(100);
+
 	obs_weak_source_release(context->audio_source);
 	context->audio_source = NULL;
 
@@ -1040,6 +1078,23 @@ static void source_record_filter_tick(void *data, float seconds)
 		context->output_active = false;
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
 	}
+
+	if (context->output_active && context->fileOutput &&
+	    context->record_max_seconds) {
+		int totalFrames =
+			obs_output_get_total_frames(context->fileOutput);
+		video_t *video = obs_output_video(context->fileOutput);
+		uint64_t frameTimeNs = video_output_get_frame_time(video);
+		long long msecs =
+			util_mul_div64(totalFrames, frameTimeNs, 1000000ULL);
+		if (msecs >= context->record_max_seconds * 1000) {
+			obs_data_t *settings = obs_data_create();
+			obs_data_set_int(settings, "record_mode",
+					 OUTPUT_MODE_NONE);
+			obs_source_update(context->source, settings);
+			obs_data_release(settings);
+		}
+	}
 }
 
 static bool encoder_changed(void *data, obs_properties_t *props,
@@ -1116,6 +1171,9 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_property_list_add_string(p, "mkv", "mkv");
 	obs_property_list_add_string(p, "ts", "ts");
 	obs_property_list_add_string(p, "m3u8", "m3u8");
+
+	obs_properties_add_int(record, "record_max_seconds",
+			       obs_module_text("MaxSeconds"), 0, 100000, 1);
 
 	obs_properties_add_group(props, "record", obs_module_text("Record"),
 				 OBS_GROUP_NORMAL, record);
@@ -1302,9 +1360,597 @@ MODULE_EXPORT const char *obs_module_description(void)
 	return "Source Record Filter";
 }
 
+static void *vendor;
+
+static void find_filter(obs_source_t *parent, obs_source_t *child, void *param)
+{
+	UNUSED_PARAMETER(parent);
+	const char *id = obs_source_get_unversioned_id(child);
+	if (strcmp(id, "source_record_filter") != 0)
+		return;
+	obs_source_t **filter = param;
+	*filter = child;
+}
+
+static void find_source_by_filter(obs_source_t *parent, obs_source_t *child,
+				  void *param)
+{
+	if (strcmp(obs_source_get_unversioned_id(child),
+		   "source_record_filter") != 0)
+		return;
+
+	DARRAY(obs_source_t *) *sources = param;
+	darray_push_back(sizeof(obs_source_t *), &sources->da, &parent);
+}
+
+static bool find_source(void *data, obs_source_t *source)
+{
+	obs_source_enum_filters(source, find_source_by_filter, data);
+	return true;
+}
+
+obs_source_t *get_source_record_filter(obs_source_t *source,
+				       obs_data_t *request_data,
+				       obs_data_t *response_data, bool create)
+{
+	const char *filter_name = obs_data_get_string(request_data, "filter");
+	obs_source_t *filter = NULL;
+	config_t *config = obs_frontend_get_profile_config();
+	if (strlen(filter_name)) {
+		filter = obs_source_get_filter_by_name(source, filter_name);
+		if (!filter) {
+			if (response_data)
+				obs_data_set_string(response_data, "error",
+						    "filter not found");
+			return NULL;
+		}
+		if (strcmp(obs_source_get_unversioned_id(filter),
+			   "source_record_filter") != 0) {
+			if (response_data)
+				obs_data_set_string(
+					response_data, "error",
+					"filter is not source record filter");
+			obs_source_release(filter);
+			return NULL;
+		}
+		struct source_record_filter_context *context =
+			obs_obj_get_data(filter);
+		if (context && context->output_active) {
+			context->restart = true;
+		}
+	} else {
+		obs_source_enum_filters(source, find_filter, &filter);
+		filter = obs_source_get_ref(filter);
+		if (!filter) {
+			if (!create) {
+				if (response_data)
+					obs_data_set_string(
+						response_data, "error",
+						"failed to find filter");
+				return NULL;
+			}
+
+			const char *filename =
+				obs_data_get_string(request_data, "filename");
+			if (!strlen(filename)) {
+				filename = config_get_string(
+					config, "Output", "FilenameFormatting");
+			}
+			obs_data_t *settings = obs_data_create();
+			obs_data_set_bool(settings, "remove_after_record",
+					  true);
+			char *filter_name = os_generate_formatted_filename(
+				NULL, true, filename);
+			filter = obs_source_get_filter_by_name(source,
+							       filter_name);
+			if (!filter) {
+				filter = obs_source_create(
+					"source_record_filter", filter_name,
+					settings, NULL);
+			} else if (strcmp(obs_source_get_unversioned_id(filter),
+					  "source_record_filter") != 0) {
+				if (response_data)
+					obs_data_set_string(
+						response_data, "error",
+						"filter is not source record filter");
+				obs_source_release(filter);
+				bfree(filter_name);
+				obs_data_release(settings);
+				return NULL;
+			} else {
+				struct source_record_filter_context *context =
+					obs_obj_get_data(filter);
+				if (context && context->output_active) {
+					context->restart = true;
+				}
+			}
+			bfree(filter_name);
+			obs_data_release(settings);
+			if (!filter) {
+				if (response_data)
+					obs_data_set_string(
+						response_data, "error",
+						"failed to create filter");
+				return NULL;
+			}
+			obs_source_filter_add(source, filter);
+		}
+	}
+	if (!obs_source_enabled(filter))
+		obs_source_set_enabled(filter, true);
+	return filter;
+}
+
+static bool start_record_source(obs_source_t *source, obs_data_t *request_data,
+				obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data,
+							response_data, true);
+	if (!filter)
+		return false;
+	obs_data_t *settings = obs_source_get_settings(filter);
+	const char *filename = obs_data_get_string(request_data, "filename");
+	struct source_record_filter_context *context = obs_obj_get_data(filter);
+	if (context && context->output_active) {
+		if (strlen(filename)) {
+			if (strstr(filename, "%") ||
+			    strcmp(filename,
+				   obs_data_get_string(
+					   settings, "filename_formatting")) !=
+				    0) {
+				context->restart = true;
+			}
+		} else if (strstr(obs_data_get_string(settings,
+						      "filename_formatting"),
+				  "%")) {
+			context->restart = true;
+		}
+	}
+
+	if (strlen(filename))
+		obs_data_set_string(settings, "filename_formatting", filename);
+	if (obs_data_has_user_value(request_data, "max_seconds"))
+		obs_data_set_int(settings, "record_max_seconds",
+				 obs_data_get_int(request_data, "max_seconds"));
+	obs_data_set_int(settings, "record_mode", OUTPUT_MODE_ALWAYS);
+
+	obs_source_update(filter, settings);
+	obs_data_release(settings);
+
+	obs_source_release(filter);
+	return true;
+}
+
+static bool stop_record_source(obs_source_t *source, obs_data_t *request_data,
+			       obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data,
+							response_data, false);
+	if (!filter)
+		return false;
+
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_int(settings, "record_mode", OUTPUT_MODE_NONE);
+	obs_source_update(filter, settings);
+	obs_data_release(settings);
+	obs_source_release(filter);
+	return true;
+}
+
+static void websocket_start_record(obs_data_t *request_data,
+				   obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error",
+					    "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		if (obs_data_get_bool(request_data, "stop_existing"))
+			stop_record_source(source, request_data, NULL);
+		success = start_record_source(source, request_data,
+					      response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error",
+					    "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = start_record_source(sources.array[i],
+						      request_data,
+						      response_data) &&
+				  success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static void websocket_stop_record(obs_data_t *request_data,
+				  obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error",
+					    "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		success =
+			stop_record_source(source, request_data, response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error",
+					    "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = stop_record_source(sources.array[i],
+						     request_data,
+						     response_data) &&
+				  success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static bool start_replay_buffer_source(obs_source_t *source,
+				       obs_data_t *request_data,
+				       obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data,
+							response_data, true);
+	if (!filter)
+		return false;
+	obs_data_t *settings = obs_source_get_settings(filter);
+	const char *filename = obs_data_get_string(request_data, "filename");
+	struct source_record_filter_context *context = obs_obj_get_data(filter);
+	if (context && context->output_active) {
+		if (strlen(filename)) {
+			if (strstr(filename, "%") ||
+			    strcmp(filename,
+				   obs_data_get_string(
+					   settings, "filename_formatting")) !=
+				    0) {
+				context->restart = true;
+			}
+		} else if (strstr(obs_data_get_string(settings,
+						      "filename_formatting"),
+				  "%")) {
+			context->restart = true;
+		}
+	}
+
+	if (strlen(filename))
+		obs_data_set_string(settings, "filename_formatting", filename);
+
+	obs_data_set_bool(settings, "replay_buffer", true);
+
+	obs_source_update(filter, settings);
+	obs_data_release(settings);
+
+	obs_source_release(filter);
+	return true;
+}
+
+static bool stop_replay_buffer_source(obs_source_t *source,
+				      obs_data_t *request_data,
+				      obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data,
+							response_data, false);
+	if (!filter)
+		return false;
+
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_bool(settings, "replay_buffer", false);
+	obs_source_update(filter, settings);
+	obs_data_release(settings);
+	obs_source_release(filter);
+	return true;
+}
+
+static bool save_replay_buffer_source(obs_source_t *source,
+				      obs_data_t *request_data,
+				      obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data,
+							response_data, false);
+	if (!filter)
+		return false;
+	struct source_record_filter_context *context = obs_obj_get_data(filter);
+	if (!context->replayOutput)
+		return false;
+
+	proc_handler_t *ph = obs_output_get_proc_handler(context->replayOutput);
+	calldata_t cd = {0};
+	bool success = proc_handler_call(ph, "save", &cd);
+	calldata_free(&cd);
+	obs_source_release(filter);
+	return success;
+}
+
+static void websocket_start_replay_buffer(obs_data_t *request_data,
+					  obs_data_t *response_data,
+					  void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error",
+					    "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		if (obs_data_get_bool(request_data, "stop_existing"))
+			stop_replay_buffer_source(source, request_data, NULL);
+		success = start_replay_buffer_source(source, request_data,
+						     response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error",
+					    "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = start_replay_buffer_source(sources.array[i],
+							     request_data,
+							     response_data) &&
+				  success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static void websocket_stop_replay_buffer(obs_data_t *request_data,
+					 obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error",
+					    "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		success = stop_replay_buffer_source(source, request_data,
+						    response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error",
+					    "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = stop_replay_buffer_source(sources.array[i],
+							    request_data,
+							    response_data) &&
+				  success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static void websocket_save_replay_buffer(obs_data_t *request_data,
+					 obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error",
+					    "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		success = save_replay_buffer_source(source, request_data,
+						    response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error",
+					    "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = save_replay_buffer_source(sources.array[i],
+							    request_data,
+							    response_data) &&
+				  success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static bool start_stream_source(obs_source_t *source, obs_data_t *request_data,
+				obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data,
+							response_data, true);
+	if (!filter)
+		return false;
+	obs_data_t *settings = obs_source_get_settings(filter);
+
+	const char *server = obs_data_get_string(request_data, "server");
+	if (server && strlen(server))
+		obs_data_set_string(settings, "server", server);
+
+	const char *key = obs_data_get_string(request_data, "key");
+	if (key && strlen(key))
+		obs_data_set_string(settings, "key", key);
+
+	obs_data_set_int(settings, "stream_mode", OUTPUT_MODE_ALWAYS);
+
+	obs_source_update(filter, settings);
+	obs_data_release(settings);
+
+	obs_source_release(filter);
+	return true;
+}
+
+static bool stop_stream_source(obs_source_t *source, obs_data_t *request_data,
+			       obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data,
+							response_data, false);
+	if (!filter)
+		return false;
+
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_int(settings, "stream_mode", OUTPUT_MODE_NONE);
+	obs_source_update(filter, settings);
+	obs_data_release(settings);
+	obs_source_release(filter);
+	return true;
+}
+
+static void websocket_start_stream(obs_data_t *request_data,
+				   obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error",
+					    "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		if (obs_data_get_bool(request_data, "stop_existing"))
+			stop_stream_source(source, request_data, NULL);
+		success = start_stream_source(source, request_data,
+					      response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error",
+					    "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = start_stream_source(sources.array[i],
+						      request_data,
+						      response_data) &&
+				  success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static void websocket_stop_stream(obs_data_t *request_data,
+				  obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error",
+					    "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		success =
+			stop_stream_source(source, request_data, response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error",
+					    "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = stop_stream_source(sources.array[i],
+						     request_data,
+						     response_data) &&
+				  success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
 bool obs_module_load(void)
 {
 	blog(LOG_INFO, "[Source Record] loaded version %s", PROJECT_VERSION);
 	obs_register_source(&source_record_filter_info);
+
+	vendor = obs_websocket_register_vendor("source-record");
+	obs_websocket_vendor_register_request(vendor, "record_start",
+					      websocket_start_record, NULL);
+	obs_websocket_vendor_register_request(vendor, "record_stop",
+					      websocket_stop_record, NULL);
+	obs_websocket_vendor_register_request(vendor, "replay_buffer_start",
+					      websocket_start_replay_buffer,
+					      NULL);
+	obs_websocket_vendor_register_request(vendor, "replay_buffer_stop",
+					      websocket_stop_replay_buffer,
+					      NULL);
+	obs_websocket_vendor_register_request(vendor, "replay_buffer_save",
+					      websocket_save_replay_buffer,
+					      NULL);
+	obs_websocket_vendor_register_request(vendor, "stream_start",
+					      websocket_start_stream, NULL);
+	obs_websocket_vendor_register_request(vendor, "stream_stop",
+					      websocket_stop_stream, NULL);
+
 	return true;
 }
