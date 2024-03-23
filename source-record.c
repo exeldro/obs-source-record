@@ -849,6 +849,11 @@ static void source_record_filter_defaults(obs_data_t *settings)
 static void source_record_filter_filter_remove(void *data,
 					       obs_source_t *parent);
 
+static void update_task(void* param) {
+	struct source_record_filter_context *context = param;
+	obs_source_update(context->source, NULL);
+}
+
 static void frontend_event(enum obs_frontend_event event, void *data)
 {
 	struct source_record_filter_context *context = data;
@@ -862,7 +867,7 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 	    event == OBS_FRONTEND_EVENT_RECORDING_STOPPED ||
 	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED ||
 	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED) {
-		obs_source_update(context->source, NULL);
+		obs_queue_task(OBS_TASK_GRAPHICS, update_task, data, false);
 	} else if (event == OBS_FRONTEND_EVENT_EXIT ||
 		   event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
 		context->closing = true;
@@ -1319,18 +1324,21 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 	struct source_record_filter_context *context = data;
 	context->closing = true;
 	if (context->fileOutput) {
-		obs_output_force_stop(context->fileOutput);
-		obs_output_release(context->fileOutput);
+		pthread_t thread;
+		pthread_create(&thread, NULL, force_stop_output_thread,
+			       context->fileOutput);
 		context->fileOutput = NULL;
 	}
 	if (context->streamOutput) {
-		obs_output_force_stop(context->streamOutput);
-		obs_output_release(context->streamOutput);
+		pthread_t thread;
+		pthread_create(&thread, NULL, force_stop_output_thread,
+			       context->streamOutput);
 		context->streamOutput = NULL;
 	}
 	if (context->replayOutput) {
-		obs_output_force_stop(context->replayOutput);
-		obs_output_release(context->replayOutput);
+		pthread_t thread;
+		pthread_create(&thread, NULL, force_stop_output_thread,
+			       context->replayOutput);
 		context->replayOutput = NULL;
 	}
 	obs_frontend_remove_event_callback(frontend_event, context);
