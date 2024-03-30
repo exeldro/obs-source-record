@@ -48,10 +48,10 @@ struct source_record_filter_context {
 
 static void run_queued(obs_task_t task, void *param)
 {
-	if (obs_in_task_thread(OBS_TASK_GRAPHICS)) {
-		obs_queue_task(OBS_TASK_UI, task, param, false);
-	} else {
+	if (obs_in_task_thread(OBS_TASK_UI)) {
 		obs_queue_task(OBS_TASK_GRAPHICS, task, param, false);
+	} else {
+		obs_queue_task(OBS_TASK_UI, task, param, false);
 	}
 }
 
@@ -233,7 +233,7 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in,
 	return true;
 }
 
-static void *start_file_output_thread(void *data)
+static void start_file_output_task(void *data)
 {
 	struct source_record_filter_context *context = data;
 	if (obs_output_start(context->fileOutput)) {
@@ -244,10 +244,9 @@ static void *start_file_output_thread(void *data)
 		}
 	}
 	context->starting_file_output = false;
-	return NULL;
 }
 
-static void *start_stream_output_thread(void *data)
+static void start_stream_output_task(void *data)
 {
 	struct source_record_filter_context *context = data;
 	if (obs_output_start(context->streamOutput)) {
@@ -258,7 +257,6 @@ static void *start_stream_output_thread(void *data)
 		}
 	}
 	context->starting_stream_output = false;
-	return NULL;
 }
 
 void release_output_stopped(void *data, calldata_t *cd)
@@ -381,8 +379,7 @@ static void start_file_output(struct source_record_filter_context *filter,
 
 	filter->starting_file_output = true;
 
-	pthread_t thread;
-	pthread_create(&thread, NULL, start_file_output_thread, filter);
+	run_queued(start_file_output_task, filter);
 }
 
 #define FTL_PROTOCOL "ftl"
@@ -446,8 +443,7 @@ static void start_stream_output(struct source_record_filter_context *filter,
 
 	filter->starting_stream_output = true;
 
-	pthread_t thread;
-	pthread_create(&thread, NULL, start_stream_output_thread, filter);
+	run_queued(start_stream_output_task, filter);
 }
 
 static void start_replay_output(struct source_record_filter_context *filter,
@@ -934,14 +930,14 @@ static void source_record_filter_destroy(void *data)
 		context->replayOutput = NULL;
 	}
 
-	if (context->video_output) {
-		obs_view_set_source(context->view, 0, NULL);
-		obs_view_remove(context->view);
-		context->video_output = NULL;
-	}
-
 	if (context->enableHotkey != OBS_INVALID_HOTKEY_PAIR_ID)
 		obs_hotkey_pair_unregister(context->enableHotkey);
+
+	while (obs_encoder_active(context->encoder) ||
+	       (context->audio_track <=
+		0 && obs_encoder_active(context->aacTrack))) {
+		os_sleep_ms(10);
+	}
 
 	obs_encoder_release(context->aacTrack);
 	obs_encoder_release(context->encoder);
@@ -953,6 +949,12 @@ static void source_record_filter_destroy(void *data)
 		audio_output_close(context->audio_output);
 
 	obs_service_release(context->service);
+
+	if (context->video_output) {
+		obs_view_set_source(context->view, 0, NULL);
+		obs_view_remove(context->view);
+		context->video_output = NULL;
+	}
 
 	obs_view_destroy(context->view);
 
