@@ -907,6 +907,40 @@ static void *source_record_filter_create(obs_data_t *settings,
 	return context;
 }
 
+static void source_record_delayed_destroy(void* data) {
+	struct source_record_filter_context *context = data;
+	if (context->encoder && obs_encoder_active(context->encoder)) {
+		run_queued(source_record_delayed_destroy, context);
+		return;
+	}
+	if (context->aacTrack && context->audio_track <= 0 &&
+	    obs_encoder_active(context->aacTrack)) {
+		run_queued(source_record_delayed_destroy, context);
+		return;
+	}
+
+	obs_encoder_release(context->aacTrack);
+	obs_encoder_release(context->encoder);
+
+	obs_weak_source_release(context->audio_source);
+	context->audio_source = NULL;
+
+	if (context->audio_track <= 0)
+		audio_output_close(context->audio_output);
+
+	obs_service_release(context->service);
+
+	if (context->video_output) {
+		obs_view_set_source(context->view, 0, NULL);
+		obs_view_remove(context->view);
+		context->video_output = NULL;
+	}
+
+	obs_view_destroy(context->view);
+
+	bfree(context);
+}
+
 static void source_record_filter_destroy(void *data)
 {
 	struct source_record_filter_context *context = data;
@@ -933,32 +967,9 @@ static void source_record_filter_destroy(void *data)
 	if (context->enableHotkey != OBS_INVALID_HOTKEY_PAIR_ID)
 		obs_hotkey_pair_unregister(context->enableHotkey);
 
-	while (obs_encoder_active(context->encoder) ||
-	       (context->audio_track <=
-		0 && obs_encoder_active(context->aacTrack))) {
-		os_sleep_ms(10);
-	}
+	source_record_delayed_destroy(context);
 
-	obs_encoder_release(context->aacTrack);
-	obs_encoder_release(context->encoder);
 
-	obs_weak_source_release(context->audio_source);
-	context->audio_source = NULL;
-
-	if (context->audio_track <= 0)
-		audio_output_close(context->audio_output);
-
-	obs_service_release(context->service);
-
-	if (context->video_output) {
-		obs_view_set_source(context->view, 0, NULL);
-		obs_view_remove(context->view);
-		context->video_output = NULL;
-	}
-
-	obs_view_destroy(context->view);
-
-	bfree(context);
 }
 
 static bool source_record_enable_hotkey(void *data, obs_hotkey_pair_id id,
