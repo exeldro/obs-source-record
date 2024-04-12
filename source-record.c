@@ -44,6 +44,7 @@ struct source_record_filter_context {
 	struct vec4 backgroundColor;
 	bool remove_after_record;
 	long long record_max_seconds;
+	int last_frontend_event;
 };
 
 static void run_queued(obs_task_t task, void *param)
@@ -661,14 +662,32 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	} else if (record_mode == OUTPUT_MODE_ALWAYS) {
 		record = true;
 	} else if (record_mode == OUTPUT_MODE_RECORDING) {
-		record = obs_frontend_recording_active();
+		record = obs_frontend_recording_active() &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_RECORDING_STOPPING &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_RECORDING_STOPPED;
 	} else if (record_mode == OUTPUT_MODE_STREAMING) {
-		record = obs_frontend_streaming_active();
+		record = obs_frontend_streaming_active() &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_STREAMING_STOPPING &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_STREAMING_STOPPED;
 	} else if (record_mode == OUTPUT_MODE_STREAMING_OR_RECORDING) {
-		record = obs_frontend_streaming_active() ||
-			 obs_frontend_recording_active();
+		record = (obs_frontend_streaming_active() &&
+			  filter->last_frontend_event !=
+				  OBS_FRONTEND_EVENT_STREAMING_STOPPING &&
+			  filter->last_frontend_event !=
+				  OBS_FRONTEND_EVENT_STREAMING_STOPPED) ||
+			 (obs_frontend_recording_active() &&
+			  filter->last_frontend_event !=
+				  OBS_FRONTEND_EVENT_RECORDING_STOPPING &&
+			  filter->last_frontend_event !=
+				  OBS_FRONTEND_EVENT_RECORDING_STOPPED);
 	} else if (record_mode == OUTPUT_MODE_VIRTUAL_CAMERA) {
-		record = obs_frontend_virtualcam_active();
+		record = obs_frontend_virtualcam_active() &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED;
 	}
 
 	if (record != filter->record) {
@@ -722,14 +741,32 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	} else if (stream_mode == OUTPUT_MODE_ALWAYS) {
 		stream = true;
 	} else if (stream_mode == OUTPUT_MODE_RECORDING) {
-		stream = obs_frontend_recording_active();
+		stream = obs_frontend_recording_active() &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_RECORDING_STOPPING &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_RECORDING_STOPPED;
 	} else if (stream_mode == OUTPUT_MODE_STREAMING) {
-		stream = obs_frontend_streaming_active();
+		stream = obs_frontend_streaming_active() &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_STREAMING_STOPPING &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_STREAMING_STOPPED;
 	} else if (stream_mode == OUTPUT_MODE_STREAMING_OR_RECORDING) {
-		stream = obs_frontend_streaming_active() ||
-			 obs_frontend_recording_active();
+		stream = (obs_frontend_streaming_active() &&
+			  filter->last_frontend_event !=
+				  OBS_FRONTEND_EVENT_STREAMING_STOPPING &&
+			  filter->last_frontend_event !=
+				  OBS_FRONTEND_EVENT_STREAMING_STOPPED) ||
+			 (obs_frontend_recording_active() &&
+			  filter->last_frontend_event !=
+				  OBS_FRONTEND_EVENT_RECORDING_STOPPING &&
+			  filter->last_frontend_event !=
+				  OBS_FRONTEND_EVENT_RECORDING_STOPPED);
 	} else if (stream_mode == OUTPUT_MODE_VIRTUAL_CAMERA) {
-		stream = obs_frontend_virtualcam_active();
+		stream = obs_frontend_virtualcam_active() &&
+			 filter->last_frontend_event !=
+				 OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED;
 	}
 
 	if (stream != filter->stream) {
@@ -887,6 +924,8 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 	    event == OBS_FRONTEND_EVENT_RECORDING_STOPPED ||
 	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED ||
 	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED) {
+		context->last_frontend_event = (int)event;
+
 		obs_queue_task(OBS_TASK_GRAPHICS, update_task, data, false);
 	} else if (event == OBS_FRONTEND_EVENT_EXIT ||
 		   event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
@@ -901,13 +940,15 @@ static void *source_record_filter_create(obs_data_t *settings,
 		bzalloc(sizeof(struct source_record_filter_context));
 	context->source = source;
 
+	context->last_frontend_event = -1;
 	context->enableHotkey = OBS_INVALID_HOTKEY_PAIR_ID;
 	source_record_filter_update(context, settings);
 	obs_frontend_add_event_callback(frontend_event, context);
 	return context;
 }
 
-static void source_record_delayed_destroy(void* data) {
+static void source_record_delayed_destroy(void *data)
+{
 	struct source_record_filter_context *context = data;
 	if (context->encoder && obs_encoder_active(context->encoder)) {
 		run_queued(source_record_delayed_destroy, context);
@@ -968,8 +1009,6 @@ static void source_record_filter_destroy(void *data)
 		obs_hotkey_pair_unregister(context->enableHotkey);
 
 	source_record_delayed_destroy(context);
-
-
 }
 
 static bool source_record_enable_hotkey(void *data, obs_hotkey_pair_id id,
