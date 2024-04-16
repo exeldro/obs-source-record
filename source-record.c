@@ -358,8 +358,8 @@ static void update_video_encoder(struct source_record_filter_context *filter, ob
 			const char *enc_id = get_encoder_id(settings);
 			filter->encoder = obs_video_encoder_create(enc_id, obs_source_get_name(filter->source), settings, NULL);
 			obs_encoder_set_scaled_size(filter->encoder, 0, 0);
-			obs_encoder_set_video(filter->encoder, filter->video_output);
 		}
+		obs_encoder_set_video(filter->encoder, filter->video_output);
 	}
 	if (filter->fileOutput && obs_output_get_video_encoder(filter->fileOutput) != filter->encoder)
 		obs_output_set_video_encoder(filter->fileOutput, filter->encoder);
@@ -674,11 +674,11 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	}
 
 	if (!replay_buffer && !record && !stream) {
-		if (filter->encoder) {
+		if (filter->encoder && !obs_encoder_active(filter->encoder)) {
 			obs_encoder_release(filter->encoder);
 			filter->encoder = NULL;
 		}
-		if (filter->aacTrack) {
+		if (filter->aacTrack && !obs_encoder_active(filter->aacTrack)) {
 			obs_encoder_release(filter->aacTrack);
 			filter->aacTrack = NULL;
 		}
