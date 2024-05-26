@@ -47,6 +47,8 @@ struct source_record_filter_context {
 	int last_frontend_event;
 };
 
+DARRAY(obs_source_t *) source_record_filters;
+
 static void run_queued(obs_task_t task, void *param)
 {
 	if (obs_in_task_thread(OBS_TASK_UI)) {
@@ -797,6 +799,7 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 	struct source_record_filter_context *context = bzalloc(sizeof(struct source_record_filter_context));
 	context->source = source;
 
+	da_push_back(source_record_filters, &source);
 	context->last_frontend_event = -1;
 	context->enableHotkey = OBS_INVALID_HOTKEY_PAIR_ID;
 	source_record_filter_update(context, settings);
@@ -841,6 +844,7 @@ static void source_record_delayed_destroy(void *data)
 static void source_record_filter_destroy(void *data)
 {
 	struct source_record_filter_context *context = data;
+	da_erase_item(source_record_filters, &context->source);
 	context->closing = true;
 	if (context->output_active) {
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
@@ -1009,12 +1013,16 @@ static bool encoder_changed(void *data, obs_properties_t *props, obs_property_t 
 	UNUSED_PARAMETER(property);
 	UNUSED_PARAMETER(settings);
 	obs_properties_remove_by_name(props, "encoder_group");
+	bool visible = obs_property_visible(obs_properties_get(props, "others"));
+	obs_properties_remove_by_name(props, "others");
 	obs_properties_remove_by_name(props, "plugin_info");
 	const char *enc_id = get_encoder_id(settings);
 	obs_properties_t *enc_props = obs_get_encoder_properties(enc_id);
 	if (enc_props) {
 		obs_properties_add_group(props, "encoder_group", obs_encoder_get_display_name(enc_id), OBS_GROUP_NORMAL, enc_props);
 	}
+	obs_property_t *p = obs_properties_add_text(props, "others", obs_module_text("OtherSourceRecords"), OBS_TEXT_INFO);
+	obs_property_set_visible(p, visible);
 	obs_properties_add_text(
 		props, "plugin_info",
 		"<a href=\"https://obsproject.com/forum/resources/source-record.1285/\">Source Record</a> (" PROJECT_VERSION
@@ -1154,6 +1162,41 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_properties_t *group = obs_properties_create();
 	obs_properties_add_group(props, "encoder_group", obs_module_text("Encoder"), OBS_GROUP_NORMAL, group);
 
+	p = obs_properties_add_text(props, "others", obs_module_text("OtherSourceRecords"), OBS_TEXT_INFO);
+	if (data) {
+		struct source_record_filter_context *context = data;
+		struct dstr sources_text;
+		dstr_init(&sources_text);
+		for (size_t i = 0; i < source_record_filters.num; i++) {
+			if (source_record_filters.array[i] == context->source)
+				continue;
+			if (sources_text.len)
+				dstr_cat(&sources_text, "\n");
+			obs_source_t *parent = obs_filter_get_parent(source_record_filters.array[i]);
+			if (parent) {
+				dstr_cat(&sources_text, obs_source_get_name(parent));
+				dstr_cat(&sources_text, " - ");
+			}
+			dstr_cat(&sources_text, obs_source_get_name(source_record_filters.array[i]));
+		}
+		if (sources_text.len > 0) {
+			obs_data_t *settings = obs_source_get_settings(context->source);
+			obs_data_set_string(settings, "others", sources_text.array);
+			obs_data_release(settings);
+			obs_property_set_visible(p, true);
+		} else {
+			obs_property_set_visible(p, false);
+		}
+		dstr_free(&sources_text);
+	} else {
+		obs_property_set_visible(p, false);
+	}
+
+	obs_properties_add_text(
+		props, "plugin_info",
+		"<a href=\"https://obsproject.com/forum/resources/source-record.1285/\">Source Record</a> (" PROJECT_VERSION
+		") by <a href=\"https://www.exeldro.com\">Exeldro</a>",
+		OBS_TEXT_INFO);
 	return props;
 }
 
@@ -1677,6 +1720,8 @@ bool obs_module_load(void)
 	blog(LOG_INFO, "[Source Record] loaded version %s", PROJECT_VERSION);
 	obs_register_source(&source_record_filter_info);
 
+	da_init(source_record_filters);
+
 	vendor = obs_websocket_register_vendor("source-record");
 	obs_websocket_vendor_register_request(vendor, "record_start", websocket_start_record, NULL);
 	obs_websocket_vendor_register_request(vendor, "record_stop", websocket_stop_record, NULL);
@@ -1687,4 +1732,9 @@ bool obs_module_load(void)
 	obs_websocket_vendor_register_request(vendor, "stream_stop", websocket_stop_stream, NULL);
 
 	return true;
+}
+
+void obs_module_unload(void)
+{
+	da_free(source_record_filters);
 }
