@@ -224,6 +224,21 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 	return true;
 }
 
+static const char *GetFormatExt(const char *format)
+{
+	if (strcmp(format, "fragmented_mp4") == 0)
+		return "mp4";
+	if (strcmp(format, "hybrid_mp4") == 0)
+		return "mp4";
+	if (strcmp(format, "fragmented_mov") == 0)
+		return "mov";
+	if (strcmp(format, "hls") == 0)
+		return "m3u8";
+	if (strcmp(format, "mpegts") == 0)
+		return "ts";
+	return format;
+}
+
 static void start_file_output_task(void *data)
 {
 	struct source_record_filter_context *context = data;
@@ -375,14 +390,19 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 {
 	obs_data_t *s = obs_data_create();
 	char path[512];
-	char *filename = os_generate_formatted_filename(obs_data_get_string(settings, "rec_format"), true,
+	const char *format = obs_data_get_string(settings, "rec_format");
+	char *filename = os_generate_formatted_filename(GetFormatExt(format), true,
 							obs_data_get_string(settings, "filename_formatting"));
 	snprintf(path, 512, "%s/%s", obs_data_get_string(settings, "path"), filename);
 	bfree(filename);
 	ensure_directory(path);
 	obs_data_set_string(s, "path", path);
-	if (!filter->fileOutput) {
-		filter->fileOutput = obs_output_create("ffmpeg_muxer", obs_source_get_name(filter->source), s, NULL);
+
+	bool use_native = strcmp(format, "hybrid_mp4") == 0;
+	const char *output_id = use_native ? "mp4_output" : "ffmpeg_muxer";
+	if (!filter->fileOutput || strcmp(obs_output_get_id(filter->fileOutput), output_id) != 0) {
+		obs_output_release(filter->fileOutput);
+		filter->fileOutput = obs_output_create(output_id, obs_source_get_name(filter->source), s, NULL);
 		if (filter->remove_after_record) {
 			signal_handler_t *sh = obs_output_get_signal_handler(filter->fileOutput);
 			signal_handler_connect(sh, "stop", remove_filter, filter);
@@ -465,7 +485,7 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 
 	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
 	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
-	obs_data_set_string(s, "extension", obs_data_get_string(settings, "rec_format"));
+	obs_data_set_string(s, "extension", GetFormatExt(obs_data_get_string(settings, "rec_format")));
 	obs_data_set_bool(s, "allow_spaces", true);
 	filter->replay_buffer_duration = obs_data_get_int(settings, "replay_duration");
 	obs_data_set_int(s, "max_time_sec", filter->replay_buffer_duration);
@@ -743,7 +763,7 @@ static void source_record_filter_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "path", rec_path);
 	obs_data_set_default_string(settings, "filename_formatting", config_get_string(config, "Output", "FilenameFormatting"));
 	obs_data_set_default_string(settings, "rec_format",
-				    config_get_string(config, adv_out ? "AdvOut" : "SimpleOutput", "RecFormat"));
+				    config_get_string(config, adv_out ? "AdvOut" : "SimpleOutput", "RecFormat2"));
 
 	obs_data_set_default_int(settings, "backgroundColor", 0);
 
@@ -991,6 +1011,10 @@ static void source_record_filter_tick(void *data, float seconds)
 		}
 		context->output_active = false;
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
+		if (context->video_output) {
+			obs_view_remove(context->view);
+			context->video_output = NULL;
+		}
 	}
 
 	if (context->output_active && context->fileOutput && context->record_max_seconds) {
@@ -1061,10 +1085,13 @@ static obs_properties_t *source_record_filter_properties(void *data)
 
 	obs_properties_add_path(record, "path", obs_module_text("Path"), OBS_PATH_DIRECTORY, NULL, NULL);
 	obs_properties_add_text(record, "filename_formatting", obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
-	p = obs_properties_add_list(record, "rec_format", obs_module_text("RecFormat"), OBS_COMBO_TYPE_EDITABLE,
+	p = obs_properties_add_list(record, "rec_format", obs_module_text("RecFormat"), OBS_COMBO_TYPE_LIST,
 				    OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p, "flv", "flv");
 	obs_property_list_add_string(p, "mp4", "mp4");
+	obs_property_list_add_string(p, "hybrid_mp4", "hybrid_mp4");
+	obs_property_list_add_string(p, "fragmented_mp4", "fragmented_mp4");
+	obs_property_list_add_string(p, "fragmented_mov", "fragmented_mov");
 	obs_property_list_add_string(p, "mov", "mov");
 	obs_property_list_add_string(p, "mkv", "mkv");
 	obs_property_list_add_string(p, "ts", "ts");
