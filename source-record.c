@@ -391,8 +391,8 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	obs_data_t *s = obs_data_create();
 	char path[512];
 	const char *format = obs_data_get_string(settings, "rec_format");
-	char *filename = os_generate_formatted_filename(GetFormatExt(format), true,
-							obs_data_get_string(settings, "filename_formatting"));
+	char *filename =
+		os_generate_formatted_filename(GetFormatExt(format), true, obs_data_get_string(settings, "filename_formatting"));
 	snprintf(path, 512, "%s/%s", obs_data_get_string(settings, "path"), filename);
 	bfree(filename);
 	ensure_directory(path);
@@ -438,23 +438,39 @@ static void start_stream_output(struct source_record_filter_context *filter, obs
 	}
 	obs_service_apply_encoder_settings(filter->service, settings, NULL);
 
-#if LIBOBS_API_VER < MAKE_SEMANTIC_VERSION(29, 0, 2)
-	const char *type = obs_service_get_output_type(filter->service);
-#else
-	const char *type = obs_service_get_preferred_output_type(filter->service);
-#endif
-	if (!type) {
-		type = "rtmp_output";
-#if LIBOBS_API_VER < MAKE_SEMANTIC_VERSION(29, 0, 2)
-		const char *url = obs_service_get_url(filter->service);
-#else
-		const char *url = obs_service_get_connect_info(filter->service, OBS_SERVICE_CONNECT_INFO_SERVER_URL);
-#endif
-		if (url != NULL && strncmp(url, FTL_PROTOCOL, strlen(FTL_PROTOCOL)) == 0) {
-			type = "ftl_output";
-		} else if (url != NULL && strncmp(url, RTMP_PROTOCOL, strlen(RTMP_PROTOCOL)) != 0) {
-			type = "ffmpeg_mpegts_muxer";
+	const char *type = NULL;
+	void *handle = os_dlopen("obs");
+	if (handle) {
+		const char *(*type_func)(obs_service_t *) =
+			(const char *(*)(obs_service_t *))os_dlsym(handle, "obs_service_get_output_type");
+		if (!type_func)
+			type_func = (const char *(*)(obs_service_t *))os_dlsym(handle, "obs_service_get_preferred_output_type");
+		if (type_func) {
+			type = type_func(filter->service);
 		}
+		if (!type) {
+			const char *url = NULL;
+			const char *(*url_func)(obs_service_t *) =
+				(const char *(*)(obs_service_t *))os_dlsym(handle, "obs_service_get_url");
+			if (url_func) {
+				url = url_func(filter->service);
+			} else {
+				const char *(*info_func)(obs_service_t *, uint32_t) =
+					(const char *(*)(obs_service_t *, uint32_t))os_dlsym(handle,
+											     "obs_service_get_connect_info");
+				if (info_func)
+					url = info_func(filter->service, 0); // OBS_SERVICE_CONNECT_INFO_SERVER_URL
+			}
+			type = "rtmp_output";
+			if (url != NULL && strncmp(url, "ftl", 3) == 0) {
+				type = "ftl_output";
+			} else if (url != NULL && strncmp(url, "rtmp", 4) != 0) {
+				type = "ffmpeg_mpegts_muxer";
+			}
+		}
+		os_dlclose(handle);
+	} else {
+		type = "rtmp_output";
 	}
 
 	if (!filter->streamOutput) {
@@ -809,7 +825,8 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 		context->last_frontend_event = (int)event;
 
 		obs_queue_task(OBS_TASK_GRAPHICS, update_task, data, false);
-	} else if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
+	} else if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP ||
+		   event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN) {
 		context->closing = true;
 	}
 }
