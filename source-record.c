@@ -367,6 +367,8 @@ static const char *get_encoder_id(obs_data_t *settings)
 	return enc_id;
 }
 
+static bool (*obs_encoder_set_frame_rate_divisor_func)(obs_encoder_t *, uint32_t) = NULL;
+
 static void update_video_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	if (obs_encoder_video(filter->encoder) != filter->video_output) {
@@ -374,9 +376,24 @@ static void update_video_encoder(struct source_record_filter_context *filter, ob
 			obs_encoder_release(filter->encoder);
 			const char *enc_id = get_encoder_id(settings);
 			filter->encoder = obs_video_encoder_create(enc_id, obs_source_get_name(filter->source), settings, NULL);
-			obs_encoder_set_scaled_size(filter->encoder, 0, 0);
 		}
 		obs_encoder_set_video(filter->encoder, filter->video_output);
+	}
+	uint32_t divisor = (uint32_t)obs_data_get_int(settings, "frame_rate_divisor");
+	if (divisor > 1 && obs_encoder_set_frame_rate_divisor_func)
+		obs_encoder_set_frame_rate_divisor_func(filter->encoder, divisor);
+	bool scale = obs_data_get_bool(settings, "scale");
+	if (scale) {
+		uint32_t width = (uint32_t)obs_data_get_int(settings, "width");
+		uint32_t height = (uint32_t)obs_data_get_int(settings, "height");
+		if (width > 0 && height > 0) {
+			obs_encoder_set_scaled_size(filter->encoder, width, height);
+		} else {
+			obs_encoder_set_scaled_size(filter->encoder, 0, 0);
+		}
+		//obs_encoder_set_gpu_scale_type(filter->encoder,  (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
+	} else {
+		obs_encoder_set_scaled_size(filter->encoder, 0, 0);
 	}
 	if (filter->fileOutput && obs_output_get_video_encoder(filter->fileOutput) != filter->encoder)
 		obs_output_set_video_encoder(filter->fileOutput, filter->encoder);
@@ -548,6 +565,21 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
+	if (obs_data_get_bool(settings, "scale")) {
+		const char *res = obs_data_get_string(settings, "resolution");
+		uint32_t width, height;
+		if (sscanf(res, "%dx%d", &width, &height) == 2 && width > 0 && height > 0) {
+			obs_data_set_int(settings, "width", width);
+			obs_data_set_int(settings, "height", height);
+		} else {
+			struct dstr str;
+			dstr_init(&str);
+			dstr_printf(&str, "%dx%d", (int)obs_data_get_int(settings, "width"),
+				    (int)obs_data_get_int(settings, "height"));
+			obs_data_set_string(settings, "resolution", str.array);
+			dstr_free(&str);
+		}
+	}
 	filter->remove_after_record = obs_data_get_bool(settings, "remove_after_record");
 	filter->record_max_seconds = obs_data_get_int(settings, "record_max_seconds");
 	const long long record_mode = obs_data_get_int(settings, "record_mode");
@@ -560,8 +592,23 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			obs_encoder_release(filter->encoder);
 			filter->encoder = obs_video_encoder_create(enc_id, obs_source_get_name(filter->source), settings, NULL);
 
-			obs_encoder_set_scaled_size(filter->encoder, 0, 0);
 			obs_encoder_set_video(filter->encoder, filter->video_output);
+			uint32_t divisor = (uint32_t)obs_data_get_int(settings, "frame_rate_divisor");
+			if (divisor > 1 && obs_encoder_set_frame_rate_divisor_func)
+				obs_encoder_set_frame_rate_divisor_func(filter->encoder, divisor);
+			bool scale = obs_data_get_bool(settings, "scale");
+			if (scale) {
+				uint32_t width = (uint32_t)obs_data_get_int(settings, "width");
+				uint32_t height = (uint32_t)obs_data_get_int(settings, "height");
+				if (width > 0 && height > 0) {
+					obs_encoder_set_scaled_size(filter->encoder, width, height);
+				} else {
+					obs_encoder_set_scaled_size(filter->encoder, 0, 0);
+				}
+				//obs_encoder_set_gpu_scale_type(filter->encoder,  (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
+			} else {
+				obs_encoder_set_scaled_size(filter->encoder, 0, 0);
+			}
 			if (filter->fileOutput && obs_output_get_video_encoder(filter->fileOutput) != filter->encoder)
 				obs_output_set_video_encoder(filter->fileOutput, filter->encoder);
 			if (filter->streamOutput && obs_output_get_video_encoder(filter->streamOutput) != filter->encoder)
@@ -884,7 +931,9 @@ static void source_record_filter_destroy(void *data)
 	da_erase_item(source_record_filters, &context->source);
 	context->closing = true;
 	if (context->output_active) {
-		obs_source_dec_showing(obs_filter_get_parent(context->source));
+		obs_source_t *parent = obs_filter_get_parent(context->source);
+		if (parent)
+			obs_source_dec_showing(parent);
 		context->output_active = false;
 	}
 	obs_frontend_remove_event_callback(frontend_event, context);
@@ -1166,6 +1215,35 @@ static obs_properties_t *source_record_filter_properties(void *data)
 
 	obs_properties_add_group(props, "different_audio", obs_module_text("DifferentAudio"), OBS_GROUP_CHECKABLE, audio);
 
+	obs_properties_t *scale = obs_properties_create();
+	p = obs_properties_add_list(scale, "resolution", obs_module_text("Resolution"), OBS_COMBO_TYPE_EDITABLE,
+				    OBS_COMBO_FORMAT_STRING);
+
+	obs_property_list_add_string(p, "640x480", "640x480");
+	obs_property_list_add_string(p, "800x600", "800x600");
+	obs_property_list_add_string(p, "1280x720", "1280x720");
+	obs_property_list_add_string(p, "1920x1080", "1920x1080");
+	obs_property_list_add_string(p, "2560x1440", "2560x1440");
+
+	obs_properties_add_group(props, "scale", obs_module_text("Scale"), OBS_GROUP_CHECKABLE, scale);
+
+	if (obs_encoder_set_frame_rate_divisor_func) {
+		p = obs_properties_add_list(props, "frame_rate_divisor", obs_module_text("FrameRate"), OBS_COMBO_TYPE_LIST,
+					    OBS_COMBO_FORMAT_INT);
+		struct obs_video_info ovi;
+		obs_get_video_info(&ovi);
+		float fps = ovi.fps_den > 0 ? (float)ovi.fps_num / (float)ovi.fps_den : 0.0f;
+		struct dstr str;
+		dstr_init(&str);
+		dstr_printf(&str, "%.2f fps", fps);
+		obs_property_list_add_int(p, str.array, 0);
+		for (int i = 2; i <= 10; i++) {
+			dstr_printf(&str, "%.2f fps (/%d)", fps / (float)i, i);
+			obs_property_list_add_int(p, str.array, i);
+		}
+		dstr_free(&str);
+	}
+
 	p = obs_properties_add_list(props, "encoder", obs_module_text("Encoder"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 
 	obs_property_list_add_string(p, obs_module_text("Software"), "x264");
@@ -1173,7 +1251,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 		obs_property_list_add_string(p, obs_module_text("QSV.H264"), "qsv");
 	if (EncoderAvailable("obs_qsv11_av1"))
 		obs_property_list_add_string(p, obs_module_text("QSV.AV1"), "qsv_av1");
-	if (EncoderAvailable("ffmpeg_nvenc"))
+	if (EncoderAvailable("ffmpeg_nvenc") || EncoderAvailable("jim_nvenc"))
 		obs_property_list_add_string(p, obs_module_text("NVENC.H264"), "nvenc");
 	if (EncoderAvailable("jim_av1_nvenc"))
 		obs_property_list_add_string(p, obs_module_text("NVENC.AV1"), "nvenc_av1");
@@ -1776,6 +1854,16 @@ bool obs_module_load(void)
 	obs_websocket_vendor_register_request(vendor, "stream_stop", websocket_stop_stream, NULL);
 
 	return true;
+}
+
+void obs_module_post_load(void)
+{
+	void *handle = os_dlopen("obs");
+	if (handle) {
+		obs_encoder_set_frame_rate_divisor_func =
+			(bool (*)(obs_encoder_t *, uint32_t))os_dlsym(handle, "obs_encoder_set_frame_rate_divisor");
+		os_dlclose(handle);
+	}
 }
 
 void obs_module_unload(void)
