@@ -1097,6 +1097,19 @@ static void source_record_filter_tick(void *data, float seconds)
 	}
 }
 
+static void all_properties_changed(obs_properties_t *props, obs_data_t *settings)
+{
+	obs_property_t *property = obs_properties_first(props);
+	while (property) {
+		if (obs_property_get_type(property) == OBS_PROPERTY_GROUP) {
+			all_properties_changed(obs_property_group_content(property), settings);
+		} else {
+			obs_property_modified(property, settings);
+		}
+		obs_property_next(&property);
+	}
+}
+
 static bool encoder_changed(void *data, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(data);
@@ -1109,6 +1122,7 @@ static bool encoder_changed(void *data, obs_properties_t *props, obs_property_t 
 	const char *enc_id = get_encoder_id(settings);
 	obs_properties_t *enc_props = obs_get_encoder_properties(enc_id);
 	if (enc_props) {
+		all_properties_changed(enc_props, settings);
 		obs_properties_add_group(props, "encoder_group", obs_encoder_get_display_name(enc_id), OBS_GROUP_NORMAL, enc_props);
 	}
 	obs_property_t *p = obs_properties_add_text(props, "others", obs_module_text("OtherSourceRecords"), OBS_TEXT_INFO);
