@@ -37,6 +37,7 @@ struct source_record_filter_context {
 	bool stream;
 	bool replayBuffer;
 	obs_hotkey_pair_id enableHotkey;
+	obs_hotkey_pair_id pauseHotkeys;
 	int audio_track;
 	obs_weak_source_t *audio_source;
 	bool closing;
@@ -702,6 +703,14 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		filter->record = record;
 	}
 
+	if (record && filter->fileOutput && filter->last_frontend_event == OBS_FRONTEND_EVENT_RECORDING_PAUSED &&
+	    !obs_output_paused(filter->fileOutput)) {
+		obs_output_pause(filter->fileOutput, true);
+	} else if (record && filter->fileOutput && filter->last_frontend_event == OBS_FRONTEND_EVENT_RECORDING_UNPAUSED &&
+		   obs_output_paused(filter->fileOutput)) {
+		obs_output_pause(filter->fileOutput, false);
+	}
+
 	if (replay_buffer != filter->replayBuffer) {
 		if (replay_buffer) {
 			if (obs_source_enabled(filter->source) && filter->video_output)
@@ -868,7 +877,8 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 	    event == OBS_FRONTEND_EVENT_STREAMING_STOPPING || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED ||
 	    event == OBS_FRONTEND_EVENT_RECORDING_STARTING || event == OBS_FRONTEND_EVENT_RECORDING_STARTED ||
 	    event == OBS_FRONTEND_EVENT_RECORDING_STOPPING || event == OBS_FRONTEND_EVENT_RECORDING_STOPPED ||
-	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED || event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED) {
+	    event == OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED || event == OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED ||
+	    event == OBS_FRONTEND_EVENT_RECORDING_PAUSED || event == OBS_FRONTEND_EVENT_RECORDING_UNPAUSED) {
 		context->last_frontend_event = (int)event;
 
 		obs_queue_task(OBS_TASK_GRAPHICS, update_task, data, false);
@@ -886,6 +896,7 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 	da_push_back(source_record_filters, &source);
 	context->last_frontend_event = -1;
 	context->enableHotkey = OBS_INVALID_HOTKEY_PAIR_ID;
+	context->pauseHotkeys = OBS_INVALID_HOTKEY_PAIR_ID;
 	source_record_filter_update(context, settings);
 	obs_frontend_add_event_callback(frontend_event, context);
 	return context;
@@ -954,6 +965,9 @@ static void source_record_filter_destroy(void *data)
 	if (context->enableHotkey != OBS_INVALID_HOTKEY_PAIR_ID)
 		obs_hotkey_pair_unregister(context->enableHotkey);
 
+	if (context->pauseHotkeys != OBS_INVALID_HOTKEY_PAIR_ID)
+		obs_hotkey_pair_unregister(context->pauseHotkeys);
+
 	source_record_delayed_destroy(context);
 }
 
@@ -985,6 +999,35 @@ static bool source_record_disable_hotkey(void *data, obs_hotkey_pair_id id, obs_
 	return true;
 }
 
+static bool source_record_pause_hotkey(void *data, obs_hotkey_pair_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	struct source_record_filter_context *context = data;
+	if (!pressed)
+		return false;
+
+	if (obs_output_paused(context->fileOutput))
+		return false;
+
+	obs_output_pause(context->fileOutput, true);
+	return true;
+}
+
+static bool source_record_unpause_hotkey(void *data, obs_hotkey_pair_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	struct source_record_filter_context *context = data;
+	if (!pressed)
+		return false;
+	if (!obs_output_paused(context->fileOutput))
+		return false;
+
+	obs_output_pause(context->fileOutput, false);
+	return true;
+}
+
 static void source_record_filter_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
@@ -1001,6 +1044,12 @@ static void source_record_filter_tick(void *data, float seconds)
 			parent, "source_record.enable", obs_module_text("SourceRecordEnable"), "source_record.disable",
 			obs_module_text("SourceRecordDisable"), source_record_enable_hotkey, source_record_disable_hotkey, context,
 			context);
+
+	if (context->pauseHotkeys == OBS_INVALID_HOTKEY_PAIR_ID)
+		context->pauseHotkeys = obs_hotkey_pair_register_source(
+			parent, "source_record.PauseRecording", obs_frontend_get_locale_string("Basic.Main.PauseRecording"),
+			"source_record.UnpauseRecording", obs_frontend_get_locale_string("Basic.Main.UnpauseRecording"),
+			source_record_pause_hotkey, source_record_unpause_hotkey, context, context);
 
 	uint32_t width = obs_source_get_width(parent);
 	width += (width & 1);
@@ -1515,6 +1564,34 @@ static bool start_record_source(obs_source_t *source, obs_data_t *request_data, 
 	return true;
 }
 
+static bool pause_record_source(obs_source_t *source, obs_data_t *request_data, obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data, response_data, false);
+	if (!filter)
+		return false;
+
+	struct source_record_filter_context *context = obs_obj_get_data(filter);
+	if (!context->fileOutput)
+		return false;
+	obs_output_pause(context->fileOutput, true);
+	obs_source_release(filter);
+	return true;
+}
+
+static bool unpause_record_source(obs_source_t *source, obs_data_t *request_data, obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data, response_data, false);
+	if (!filter)
+		return false;
+
+	struct source_record_filter_context *context = obs_obj_get_data(filter);
+	if (!context->fileOutput)
+		return false;
+	obs_output_pause(context->fileOutput, false);
+	obs_source_release(filter);
+	return true;
+}
+
 static bool stop_record_source(obs_source_t *source, obs_data_t *request_data, obs_data_t *response_data)
 {
 	obs_source_t *filter = get_source_record_filter(source, request_data, response_data, false);
@@ -1556,6 +1633,68 @@ static void websocket_start_record(obs_data_t *request_data, obs_data_t *respons
 		}
 		for (size_t i = 0; i < sources.num; i++) {
 			success = start_record_source(sources.array[i], request_data, response_data) && success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static void websocket_pause_record(obs_data_t *request_data, obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error", "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		success = pause_record_source(source, request_data, response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error", "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = pause_record_source(sources.array[i], request_data, response_data) && success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static void websocket_unpause_record(obs_data_t *request_data, obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error", "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		success = unpause_record_source(source, request_data, response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error", "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = unpause_record_source(sources.array[i], request_data, response_data) && success;
 		}
 		da_free(sources);
 	}
@@ -1860,6 +1999,8 @@ bool obs_module_load(void)
 
 	vendor = obs_websocket_register_vendor("source-record");
 	obs_websocket_vendor_register_request(vendor, "record_start", websocket_start_record, NULL);
+	obs_websocket_vendor_register_request(vendor, "record_pause", websocket_pause_record, NULL);
+	obs_websocket_vendor_register_request(vendor, "record_unpause", websocket_unpause_record, NULL);
 	obs_websocket_vendor_register_request(vendor, "record_stop", websocket_stop_record, NULL);
 	obs_websocket_vendor_register_request(vendor, "replay_buffer_start", websocket_start_replay_buffer, NULL);
 	obs_websocket_vendor_register_request(vendor, "replay_buffer_stop", websocket_stop_replay_buffer, NULL);
