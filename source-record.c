@@ -355,11 +355,14 @@ static const char *get_encoder_id(obs_data_t *settings)
 	} else if (strcmp(enc_id, "amd_av1") == 0) {
 		enc_id = "av1_texture_amf";
 	} else if (strcmp(enc_id, "nvenc") == 0) {
-		enc_id = EncoderAvailable("jim_nvenc") ? "jim_nvenc" : "ffmpeg_nvenc";
+		enc_id = EncoderAvailable("obs_nvenc_h264_tex") ? "obs_nvenc_h264_tex"
+								: (EncoderAvailable("jim_nvenc") ? "jim_nvenc" : "ffmpeg_nvenc");
 	} else if (strcmp(enc_id, "nvenc_hevc") == 0) {
-		enc_id = EncoderAvailable("jim_hevc_nvenc") ? "jim_hevc_nvenc" : "ffmpeg_hevc_nvenc";
+		enc_id = EncoderAvailable("obs_nvenc_hevc_tex")
+				 ? "obs_nvenc_hevc_tex"
+				 : (EncoderAvailable("jim_hevc_nvenc") ? "jim_hevc_nvenc" : "ffmpeg_hevc_nvenc");
 	} else if (strcmp(enc_id, "nvenc_av1") == 0) {
-		enc_id = "jim_av1_nvenc";
+		enc_id = EncoderAvailable("obs_nvenc_av1_tex") ? "obs_nvenc_av1_tex" : "jim_av1_nvenc";
 	} else if (strcmp(enc_id, "apple_h264") == 0) {
 		enc_id = "com.apple.videotoolbox.videoencoder.ave.avc";
 	} else if (strcmp(enc_id, "apple_hevc") == 0) {
