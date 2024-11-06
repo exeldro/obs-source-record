@@ -418,6 +418,12 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	bfree(filename);
 	ensure_directory(path);
 	obs_data_set_string(s, "path", path);
+	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
+	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
+	obs_data_set_string(s, "extension", GetFormatExt(format));
+	obs_data_set_bool(s, "split_file", obs_data_get_bool(settings, "split_file"));
+	obs_data_set_int(s, "max_size_mb", obs_data_get_int(settings, "max_size_mb"));
+	obs_data_set_int(s, "max_time_sec", obs_data_get_int(settings, "max_time_sec"));
 
 	bool use_native = strcmp(format, "hybrid_mp4") == 0;
 	const char *output_id = use_native ? "mp4_output" : "ffmpeg_muxer";
@@ -891,6 +897,8 @@ static void source_record_filter_defaults(obs_data_t *settings)
 	}
 	set_encoder_defaults(settings);
 	obs_data_set_default_int(settings, "replay_duration", 5);
+	obs_data_set_default_int(settings, "max_size_mb", 2048);
+	obs_data_set_default_int(settings, "max_time_sec", 15 * 60);
 }
 
 static void source_record_filter_filter_remove(void *data, obs_source_t *parent);
@@ -1256,6 +1264,16 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_property_list_add_string(p, "mkv", "mkv");
 	obs_property_list_add_string(p, "ts", "ts");
 	obs_property_list_add_string(p, "m3u8", "m3u8");
+
+	obs_properties_t *split_file = obs_properties_create();
+	p = obs_properties_add_int(split_file, "max_time_sec",
+				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Time"), 0, 31536000, 1);
+	obs_property_int_set_suffix(p, " sec");
+	p = obs_properties_add_int(split_file, "max_size_mb",
+				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Size"), 20, 1073741824, 1);
+	obs_property_int_set_suffix(p, " MB");
+	obs_properties_add_group(record, "split_file", obs_frontend_get_locale_string("Basic.Settings.Output.EnableSplitFile"),
+				 OBS_GROUP_CHECKABLE, split_file);
 
 	obs_properties_add_int(record, "record_max_seconds", obs_module_text("MaxSeconds"), 0, 100000, 1);
 
