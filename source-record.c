@@ -874,7 +874,7 @@ static void source_record_filter_defaults(obs_data_t *settings)
 		enc_id = config_get_string(config, "AdvOut", "RecEncoder");
 		if (strcmp(enc_id, "none") == 0 || strcmp(enc_id, "None") == 0)
 			enc_id = config_get_string(config, "AdvOut", "Encoder");
-		else if (strcmp(enc_id, "jim_nvenc") == 0)
+		else if (strcmp(enc_id, "jim_nvenc") == 0 || strcmp(enc_id, "obs_nvenc_h264_tex") == 0)
 			enc_id = "nvenc";
 		else
 			obs_data_set_default_string(settings, "encoder", enc_id);
@@ -1345,13 +1345,13 @@ static obs_properties_t *source_record_filter_properties(void *data)
 		obs_property_list_add_string(p, obs_module_text("QSV.H264"), "qsv");
 	if (EncoderAvailable("obs_qsv11_av1"))
 		obs_property_list_add_string(p, obs_module_text("QSV.AV1"), "qsv_av1");
-	if (EncoderAvailable("ffmpeg_nvenc") || EncoderAvailable("jim_nvenc"))
+	if (EncoderAvailable("ffmpeg_nvenc") || EncoderAvailable("jim_nvenc") || EncoderAvailable("obs_nvenc_h264_tex"))
 		obs_property_list_add_string(p, obs_module_text("NVENC.H264"), "nvenc");
-	if (EncoderAvailable("jim_av1_nvenc"))
+	if (EncoderAvailable("jim_av1_nvenc") || EncoderAvailable("obs_nvenc_av1_tex"))
 		obs_property_list_add_string(p, obs_module_text("NVENC.AV1"), "nvenc_av1");
 	if (EncoderAvailable("h265_texture_amf"))
 		obs_property_list_add_string(p, obs_module_text("AMD.HEVC"), "amd_hevc");
-	if (EncoderAvailable("ffmpeg_hevc_nvenc"))
+	if (EncoderAvailable("ffmpeg_hevc_nvenc") || EncoderAvailable("obs_nvenc_hevc_tex"))
 		obs_property_list_add_string(p, obs_module_text("NVENC.HEVC"), "nvenc_hevc");
 	if (EncoderAvailable("h264_texture_amf"))
 		obs_property_list_add_string(p, obs_module_text("AMD.H264"), "amd");
