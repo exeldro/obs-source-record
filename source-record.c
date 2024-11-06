@@ -1401,7 +1401,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_properties_add_group(props, "scale", obs_module_text("Scale"), OBS_GROUP_CHECKABLE, scale);
 
 	if (obs_encoder_set_frame_rate_divisor_func) {
-		p = obs_properties_add_list(props, "frame_rate_divisor", obs_module_text("FrameRate"), OBS_COMBO_TYPE_LIST,
+		p = obs_properties_add_list(props, "frame_rate_divisor", obs_module_text("Framerate"), OBS_COMBO_TYPE_LIST,
 					    OBS_COMBO_FORMAT_INT);
 		struct obs_video_info ovi;
 		obs_get_video_info(&ovi);
