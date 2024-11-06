@@ -563,6 +563,32 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 	run_queued(start_replay_task, filter);
 }
 
+static void set_encoder_defaults(obs_data_t *settings)
+{
+	obs_data_t *enc_defaults = obs_encoder_defaults(get_encoder_id(settings));
+	if (!enc_defaults)
+		return;
+	for (obs_data_item_t *enc_default = obs_data_first(enc_defaults); enc_default != NULL; obs_data_item_next(&enc_default)) {
+		if (!obs_data_item_has_default_value(enc_default))
+			continue;
+		enum obs_data_type item_type = obs_data_item_gettype(enc_default);
+		const char *name = obs_data_item_get_name(enc_default);
+		if (item_type == OBS_DATA_STRING) {
+			obs_data_set_default_string(settings, name, obs_data_item_get_default_string(enc_default));
+		} else if (item_type == OBS_DATA_NUMBER) {
+			enum obs_data_number_type num_type = obs_data_item_numtype(enc_default);
+			if (num_type == OBS_DATA_NUM_INT) {
+				obs_data_set_default_int(settings, name, obs_data_item_get_default_int(enc_default));
+			} else if (num_type == OBS_DATA_NUM_DOUBLE) {
+				obs_data_set_default_double(settings, name, obs_data_item_get_default_double(enc_default));
+			}
+		} else if (item_type == OBS_DATA_BOOLEAN) {
+			obs_data_set_default_bool(settings, name, obs_data_item_get_default_bool(enc_default));
+		}
+	}
+	obs_data_release(enc_defaults);
+}
+
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
@@ -591,6 +617,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		const char *enc_id = get_encoder_id(settings);
 		if (!filter->encoder || strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
 			obs_encoder_release(filter->encoder);
+			set_encoder_defaults(settings);
 			filter->encoder = obs_video_encoder_create(enc_id, obs_source_get_name(filter->source), settings, NULL);
 
 			obs_encoder_set_video(filter->encoder, filter->video_output);
@@ -859,6 +886,7 @@ static void source_record_filter_defaults(obs_data_t *settings)
 		}
 		obs_data_set_default_string(settings, "encoder", enc_id);
 	}
+	set_encoder_defaults(settings);
 	obs_data_set_default_int(settings, "replay_duration", 5);
 }
 
@@ -1163,11 +1191,11 @@ static bool encoder_changed(void *data, obs_properties_t *props, obs_property_t 
 {
 	UNUSED_PARAMETER(data);
 	UNUSED_PARAMETER(property);
-	UNUSED_PARAMETER(settings);
 	obs_properties_remove_by_name(props, "encoder_group");
 	bool visible = obs_property_visible(obs_properties_get(props, "others"));
 	obs_properties_remove_by_name(props, "others");
 	obs_properties_remove_by_name(props, "plugin_info");
+	set_encoder_defaults(settings);
 	const char *enc_id = get_encoder_id(settings);
 	obs_properties_t *enc_props = obs_get_encoder_properties(enc_id);
 	if (enc_props) {
