@@ -277,10 +277,6 @@ static void release_encoders(void *param)
 		obs_encoder_release(context->aacTrack);
 		context->aacTrack = NULL;
 	}
-	if (context->video_output) {
-		obs_view_remove(context->view);
-		context->video_output = NULL;
-	}
 }
 
 struct stop_output {
@@ -618,6 +614,96 @@ static void set_encoder_defaults(obs_data_t *settings)
 	obs_data_release(enc_defaults);
 }
 
+static void update_encoder(struct source_record_filter_context *filter, obs_data_t *settings) {
+	const char *enc_id = get_encoder_id(settings);
+	if (!filter->encoder || strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
+		obs_encoder_release(filter->encoder);
+		set_encoder_defaults(settings);
+		filter->encoder = obs_video_encoder_create(enc_id, obs_source_get_name(filter->source), settings, NULL);
+
+		obs_encoder_set_video(filter->encoder, filter->video_output);
+		uint32_t divisor = (uint32_t)obs_data_get_int(settings, "frame_rate_divisor");
+		if (divisor > 1 && obs_encoder_set_frame_rate_divisor_func)
+			obs_encoder_set_frame_rate_divisor_func(filter->encoder, divisor);
+		bool scale = obs_data_get_bool(settings, "scale");
+		if (scale) {
+			uint32_t width = (uint32_t)obs_data_get_int(settings, "width");
+			uint32_t height = (uint32_t)obs_data_get_int(settings, "height");
+			if (width > 0 && height > 0) {
+				obs_encoder_set_scaled_size(filter->encoder, width, height);
+			} else {
+				obs_encoder_set_scaled_size(filter->encoder, 0, 0);
+			}
+			//obs_encoder_set_gpu_scale_type(filter->encoder,  (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
+		} else {
+			obs_encoder_set_scaled_size(filter->encoder, 0, 0);
+		}
+		if (filter->fileOutput && obs_output_get_video_encoder(filter->fileOutput) != filter->encoder)
+			obs_output_set_video_encoder(filter->fileOutput, filter->encoder);
+		if (filter->streamOutput && obs_output_get_video_encoder(filter->streamOutput) != filter->encoder)
+			obs_output_set_video_encoder(filter->streamOutput, filter->encoder);
+		if (filter->replayOutput && obs_output_get_video_encoder(filter->replayOutput) != filter->encoder)
+			obs_output_set_video_encoder(filter->replayOutput, filter->encoder);
+	} else if (!obs_encoder_active(filter->encoder)) {
+		obs_encoder_update(filter->encoder, settings);
+	}
+	const int audio_track = obs_data_get_bool(settings, "different_audio") ? (int)obs_data_get_int(settings, "audio_track") : 0;
+	if (filter->closing) {
+		if (filter->audio_track <= 0 && filter->audio_output) {
+			audio_output_close(filter->audio_output);
+			filter->audio_output = NULL;
+		}
+	} else if (!filter->audio_output) {
+		if (audio_track > 0) {
+			filter->audio_output = obs_get_audio();
+		} else {
+			struct audio_output_info oi = {0};
+			oi.name = obs_source_get_name(filter->source);
+			oi.speakers = SPEAKERS_STEREO;
+			oi.samples_per_sec = audio_output_get_sample_rate(obs_get_audio());
+			oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
+			oi.input_param = filter;
+			oi.input_callback = audio_input_callback;
+			audio_output_open(&filter->audio_output, &oi);
+		}
+	} else if (audio_track > 0 && filter->audio_track <= 0) {
+		audio_output_close(filter->audio_output);
+		filter->audio_output = obs_get_audio();
+	} else if (audio_track <= 0 && filter->audio_track > 0) {
+		filter->audio_output = NULL;
+		struct audio_output_info oi = {0};
+		oi.name = obs_source_get_name(filter->source);
+		oi.speakers = SPEAKERS_STEREO;
+		oi.samples_per_sec = audio_output_get_sample_rate(obs_get_audio());
+		oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
+		oi.input_param = filter;
+		oi.input_callback = audio_input_callback;
+		audio_output_open(&filter->audio_output, &oi);
+	}
+
+	if (!filter->aacTrack || filter->audio_track != audio_track) {
+		if (filter->aacTrack) {
+			obs_encoder_release(filter->aacTrack);
+			filter->aacTrack = NULL;
+		}
+		if (audio_track > 0) {
+			filter->aacTrack = obs_audio_encoder_create("ffmpeg_aac", obs_source_get_name(filter->source), NULL,
+								    audio_track - 1, NULL);
+		} else {
+			filter->aacTrack =
+				obs_audio_encoder_create("ffmpeg_aac", obs_source_get_name(filter->source), NULL, 0, NULL);
+		}
+		if (filter->audio_output)
+			obs_encoder_set_audio(filter->aacTrack, filter->audio_output);
+
+		if (filter->fileOutput)
+			obs_output_set_audio_encoder(filter->fileOutput, filter->aacTrack, 0);
+		if (filter->replayOutput)
+			obs_output_set_audio_encoder(filter->replayOutput, filter->aacTrack, 0);
+	}
+	filter->audio_track = audio_track;
+}
+
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
@@ -642,95 +728,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	const long long stream_mode = obs_data_get_int(settings, "stream_mode");
 	const bool replay_buffer = obs_data_get_bool(settings, "replay_buffer") && !filter->closing;
 	if (!filter->closing && (record_mode != OUTPUT_MODE_NONE || stream_mode != OUTPUT_MODE_NONE || replay_buffer)) {
-
-		const char *enc_id = get_encoder_id(settings);
-		if (!filter->encoder || strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
-			obs_encoder_release(filter->encoder);
-			set_encoder_defaults(settings);
-			filter->encoder = obs_video_encoder_create(enc_id, obs_source_get_name(filter->source), settings, NULL);
-
-			obs_encoder_set_video(filter->encoder, filter->video_output);
-			uint32_t divisor = (uint32_t)obs_data_get_int(settings, "frame_rate_divisor");
-			if (divisor > 1 && obs_encoder_set_frame_rate_divisor_func)
-				obs_encoder_set_frame_rate_divisor_func(filter->encoder, divisor);
-			bool scale = obs_data_get_bool(settings, "scale");
-			if (scale) {
-				uint32_t width = (uint32_t)obs_data_get_int(settings, "width");
-				uint32_t height = (uint32_t)obs_data_get_int(settings, "height");
-				if (width > 0 && height > 0) {
-					obs_encoder_set_scaled_size(filter->encoder, width, height);
-				} else {
-					obs_encoder_set_scaled_size(filter->encoder, 0, 0);
-				}
-				//obs_encoder_set_gpu_scale_type(filter->encoder,  (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
-			} else {
-				obs_encoder_set_scaled_size(filter->encoder, 0, 0);
-			}
-			if (filter->fileOutput && obs_output_get_video_encoder(filter->fileOutput) != filter->encoder)
-				obs_output_set_video_encoder(filter->fileOutput, filter->encoder);
-			if (filter->streamOutput && obs_output_get_video_encoder(filter->streamOutput) != filter->encoder)
-				obs_output_set_video_encoder(filter->streamOutput, filter->encoder);
-			if (filter->replayOutput && obs_output_get_video_encoder(filter->replayOutput) != filter->encoder)
-				obs_output_set_video_encoder(filter->replayOutput, filter->encoder);
-		} else if (!obs_encoder_active(filter->encoder)) {
-			obs_encoder_update(filter->encoder, settings);
-		}
-		const int audio_track =
-			obs_data_get_bool(settings, "different_audio") ? (int)obs_data_get_int(settings, "audio_track") : 0;
-		if (filter->closing) {
-			if (filter->audio_track <= 0 && filter->audio_output) {
-				audio_output_close(filter->audio_output);
-				filter->audio_output = NULL;
-			}
-		} else if (!filter->audio_output) {
-			if (audio_track > 0) {
-				filter->audio_output = obs_get_audio();
-			} else {
-				struct audio_output_info oi = {0};
-				oi.name = obs_source_get_name(filter->source);
-				oi.speakers = SPEAKERS_STEREO;
-				oi.samples_per_sec = audio_output_get_sample_rate(obs_get_audio());
-				oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
-				oi.input_param = filter;
-				oi.input_callback = audio_input_callback;
-				audio_output_open(&filter->audio_output, &oi);
-			}
-		} else if (audio_track > 0 && filter->audio_track <= 0) {
-			audio_output_close(filter->audio_output);
-			filter->audio_output = obs_get_audio();
-		} else if (audio_track <= 0 && filter->audio_track > 0) {
-			filter->audio_output = NULL;
-			struct audio_output_info oi = {0};
-			oi.name = obs_source_get_name(filter->source);
-			oi.speakers = SPEAKERS_STEREO;
-			oi.samples_per_sec = audio_output_get_sample_rate(obs_get_audio());
-			oi.format = AUDIO_FORMAT_FLOAT_PLANAR;
-			oi.input_param = filter;
-			oi.input_callback = audio_input_callback;
-			audio_output_open(&filter->audio_output, &oi);
-		}
-
-		if (!filter->aacTrack || filter->audio_track != audio_track) {
-			if (filter->aacTrack) {
-				obs_encoder_release(filter->aacTrack);
-				filter->aacTrack = NULL;
-			}
-			if (audio_track > 0) {
-				filter->aacTrack = obs_audio_encoder_create("ffmpeg_aac", obs_source_get_name(filter->source), NULL,
-									    audio_track - 1, NULL);
-			} else {
-				filter->aacTrack =
-					obs_audio_encoder_create("ffmpeg_aac", obs_source_get_name(filter->source), NULL, 0, NULL);
-			}
-			if (filter->audio_output)
-				obs_encoder_set_audio(filter->aacTrack, filter->audio_output);
-
-			if (filter->fileOutput)
-				obs_output_set_audio_encoder(filter->fileOutput, filter->aacTrack, 0);
-			if (filter->replayOutput)
-				obs_output_set_audio_encoder(filter->replayOutput, filter->aacTrack, 0);
-		}
-		filter->audio_track = audio_track;
+		update_encoder(filter, settings);
 	}
 	bool record = false;
 	if (filter->closing) {
@@ -1225,6 +1223,7 @@ static void source_record_filter_tick(void *data, float seconds)
 		    !context->video_output)
 			return;
 		obs_data_t *s = obs_source_get_settings(context->source);
+		update_encoder(context, s);
 		if (context->record)
 			start_file_output(context, s);
 		if (context->stream)
@@ -1357,7 +1356,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Time"), 0, 31536000, 1);
 	obs_property_int_set_suffix(p, " sec");
 	p = obs_properties_add_int(split_file, "max_size_mb",
-				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Size"), 20, 1073741824, 1);
+				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Size"), 0, 1073741824, 1);
 	obs_property_int_set_suffix(p, " MB");
 	obs_properties_add_group(record, "split_file", obs_frontend_get_locale_string("Basic.Settings.Output.EnableSplitFile"),
 				 OBS_GROUP_CHECKABLE, split_file);
