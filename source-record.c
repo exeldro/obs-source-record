@@ -39,6 +39,7 @@ struct source_record_filter_context {
 	obs_hotkey_pair_id enableHotkey;
 	obs_hotkey_pair_id pauseHotkeys;
 	obs_hotkey_id splitHotkey;
+	obs_hotkey_id chapterHotkey;
 	int audio_track;
 	obs_weak_source_t *audio_source;
 	bool closing;
@@ -614,7 +615,8 @@ static void set_encoder_defaults(obs_data_t *settings)
 	obs_data_release(enc_defaults);
 }
 
-static void update_encoder(struct source_record_filter_context *filter, obs_data_t *settings) {
+static void update_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
+{
 	const char *enc_id = get_encoder_id(settings);
 	if (!filter->encoder || strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
 		obs_encoder_release(filter->encoder);
@@ -975,6 +977,7 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 	context->enableHotkey = OBS_INVALID_HOTKEY_PAIR_ID;
 	context->pauseHotkeys = OBS_INVALID_HOTKEY_PAIR_ID;
 	context->splitHotkey = OBS_INVALID_HOTKEY_ID;
+	context->chapterHotkey = OBS_INVALID_HOTKEY_ID;
 	source_record_filter_update(context, settings);
 	obs_frontend_add_event_callback(frontend_event, context);
 	return context;
@@ -1058,6 +1061,9 @@ static void source_record_filter_destroy(void *data)
 	if (context->splitHotkey != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(context->splitHotkey);
 
+	if (context->chapterHotkey != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(context->chapterHotkey);
+
 	source_record_delayed_destroy(context);
 }
 
@@ -1118,7 +1124,8 @@ static bool source_record_unpause_hotkey(void *data, obs_hotkey_pair_id id, obs_
 	return true;
 }
 
-static void source_record_split_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed) {
+static void source_record_split_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
 	UNUSED_PARAMETER(id);
 	UNUSED_PARAMETER(hotkey);
 	if (!pressed)
@@ -1130,6 +1137,22 @@ static void source_record_split_hotkey(void *data, obs_hotkey_id id, obs_hotkey_
 	struct calldata cd;
 	calldata_init(&cd);
 	proc_handler_call(ph, "split_file", &cd);
+	calldata_free(&cd);
+}
+
+static void source_record_chapter_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	if (!pressed)
+		return;
+	struct source_record_filter_context *context = data;
+	if (!context->fileOutput)
+		return;
+	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
+	struct calldata cd;
+	calldata_init(&cd);
+	proc_handler_call(ph, "add_chapter", &cd);
 	calldata_free(&cd);
 }
 
@@ -1160,6 +1183,11 @@ static void source_record_filter_tick(void *data, float seconds)
 		context->splitHotkey = obs_hotkey_register_source(parent, "source_record.SplitRecording",
 								  obs_frontend_get_locale_string("Basic.Main.SplitFile"),
 								  source_record_split_hotkey, context);
+
+	if (context->chapterHotkey == OBS_INVALID_HOTKEY_ID)
+		context->chapterHotkey = obs_hotkey_register_source(parent, "source_record.AddChapterMarker",
+								  obs_frontend_get_locale_string("Basic.Main.AddChapterMarker"),
+								  source_record_chapter_hotkey, context);
 
 	uint32_t width = obs_source_get_width(parent);
 	width += (width & 1);
@@ -1756,6 +1784,28 @@ static bool split_record_source(obs_source_t *source, obs_data_t *request_data, 
 	return true;
 }
 
+static bool add_chapter_record_source(obs_source_t *source, obs_data_t *request_data, obs_data_t *response_data)
+{
+	obs_source_t *filter = get_source_record_filter(source, request_data, response_data, false);
+	if (!filter)
+		return false;
+
+	struct source_record_filter_context *context = obs_obj_get_data(filter);
+	obs_source_release(filter);
+	if (!context->fileOutput)
+		return false;
+	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_string(&cd, "chapter_name", obs_data_get_string(request_data, "chapter_name"));
+	if (!proc_handler_call(ph, "add_chapter", &cd)) {
+		calldata_free(&cd);
+		return false;
+	}
+	calldata_free(&cd);
+	return true;
+}
+
 static bool stop_record_source(obs_source_t *source, obs_data_t *request_data, obs_data_t *response_data)
 {
 	obs_source_t *filter = get_source_record_filter(source, request_data, response_data, false);
@@ -1890,6 +1940,37 @@ static void websocket_split_record(obs_data_t *request_data, obs_data_t *respons
 		}
 		for (size_t i = 0; i < sources.num; i++) {
 			success = split_record_source(sources.array[i], request_data, response_data) && success;
+		}
+		da_free(sources);
+	}
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static void websocket_add_chapter_record(obs_data_t *request_data, obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *source_name = obs_data_get_string(request_data, "source");
+	bool success = true;
+	if (strlen(source_name)) {
+		obs_source_t *source = obs_get_source_by_name(source_name);
+		if (!source) {
+			obs_data_set_string(response_data, "error", "source not found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		success = add_chapter_record_source(source, request_data, response_data);
+		obs_source_release(source);
+	} else {
+		DARRAY(obs_source_t *) sources = {0};
+		obs_enum_sources(find_source, &sources);
+		obs_enum_scenes(find_source, &sources);
+		if (!sources.num) {
+			obs_data_set_string(response_data, "error", "no source found");
+			obs_data_set_bool(response_data, "success", false);
+			return;
+		}
+		for (size_t i = 0; i < sources.num; i++) {
+			success = add_chapter_record_source(sources.array[i], request_data, response_data) && success;
 		}
 		da_free(sources);
 	}
@@ -2197,6 +2278,7 @@ bool obs_module_load(void)
 	obs_websocket_vendor_register_request(vendor, "record_pause", websocket_pause_record, NULL);
 	obs_websocket_vendor_register_request(vendor, "record_unpause", websocket_unpause_record, NULL);
 	obs_websocket_vendor_register_request(vendor, "record_split", websocket_split_record, NULL);
+	obs_websocket_vendor_register_request(vendor, "record_add_chapter", websocket_add_chapter_record, NULL);
 	obs_websocket_vendor_register_request(vendor, "record_stop", websocket_stop_record, NULL);
 	obs_websocket_vendor_register_request(vendor, "replay_buffer_start", websocket_start_replay_buffer, NULL);
 	obs_websocket_vendor_register_request(vendor, "replay_buffer_stop", websocket_stop_replay_buffer, NULL);
