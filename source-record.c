@@ -1349,6 +1349,20 @@ static bool list_add_audio_sources(void *data, obs_source_t *source)
 	return true;
 }
 
+static bool source_record_split_button(obs_properties_t* props, obs_property_t* property, void* data) {
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(property);
+	struct source_record_filter_context *context = data;
+	if (!context->fileOutput)
+		return false;
+	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
+	struct calldata cd;
+	calldata_init(&cd);
+	proc_handler_call(ph, "split_file", &cd);
+	calldata_free(&cd);
+	return true;
+}
+
 static obs_properties_t *source_record_filter_properties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
@@ -1386,6 +1400,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	p = obs_properties_add_int(split_file, "max_size_mb",
 				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Size"), 0, 1073741824, 1);
 	obs_property_int_set_suffix(p, " MB");
+	obs_properties_add_button(split_file, "split_file_now", obs_frontend_get_locale_string("Basic.Main.SplitFile"),
+				   source_record_split_button);
 	obs_properties_add_group(record, "split_file", obs_frontend_get_locale_string("Basic.Settings.Output.EnableSplitFile"),
 				 OBS_GROUP_CHECKABLE, split_file);
 
