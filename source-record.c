@@ -1669,7 +1669,7 @@ obs_source_t *get_source_record_filter(obs_source_t *source, obs_data_t *request
 			return NULL;
 		}
 		struct source_record_filter_context *context = obs_obj_get_data(filter);
-		if (context && context->output_active) {
+		if (context && context->output_active && create) {
 			context->restart = true;
 		}
 	} else {
@@ -1701,7 +1701,7 @@ obs_source_t *get_source_record_filter(obs_source_t *source, obs_data_t *request
 				return NULL;
 			} else {
 				struct source_record_filter_context *context = obs_obj_get_data(filter);
-				if (context && context->output_active) {
+				if (context && context->output_active && create) {
 					context->restart = true;
 				}
 			}
