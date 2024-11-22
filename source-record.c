@@ -589,30 +589,47 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 	run_queued(start_replay_task, filter);
 }
 
+static void copy_defaults(obs_data_t *from, obs_data_t *to)
+{
+	for (obs_data_item_t *default_item = obs_data_first(from); default_item != NULL; obs_data_item_next(&default_item)) {
+		if (!obs_data_item_has_default_value(default_item))
+			continue;
+		enum obs_data_type item_type = obs_data_item_gettype(default_item);
+		const char *name = obs_data_item_get_name(default_item);
+		if (item_type == OBS_DATA_STRING) {
+			obs_data_set_default_string(to, name, obs_data_item_get_default_string(default_item));
+		} else if (item_type == OBS_DATA_NUMBER) {
+			enum obs_data_number_type num_type = obs_data_item_numtype(default_item);
+			if (num_type == OBS_DATA_NUM_INT) {
+				obs_data_set_default_int(to, name, obs_data_item_get_default_int(default_item));
+			} else if (num_type == OBS_DATA_NUM_DOUBLE) {
+				obs_data_set_default_double(to, name, obs_data_item_get_default_double(default_item));
+			}
+		} else if (item_type == OBS_DATA_BOOLEAN) {
+			obs_data_set_default_bool(to, name, obs_data_item_get_default_bool(default_item));
+		}
+	}
+}
+
 static void set_encoder_defaults(obs_data_t *settings)
 {
 	obs_data_t *enc_defaults = obs_encoder_defaults(get_encoder_id(settings));
-	if (!enc_defaults)
-		return;
-	for (obs_data_item_t *enc_default = obs_data_first(enc_defaults); enc_default != NULL; obs_data_item_next(&enc_default)) {
-		if (!obs_data_item_has_default_value(enc_default))
-			continue;
-		enum obs_data_type item_type = obs_data_item_gettype(enc_default);
-		const char *name = obs_data_item_get_name(enc_default);
-		if (item_type == OBS_DATA_STRING) {
-			obs_data_set_default_string(settings, name, obs_data_item_get_default_string(enc_default));
-		} else if (item_type == OBS_DATA_NUMBER) {
-			enum obs_data_number_type num_type = obs_data_item_numtype(enc_default);
-			if (num_type == OBS_DATA_NUM_INT) {
-				obs_data_set_default_int(settings, name, obs_data_item_get_default_int(enc_default));
-			} else if (num_type == OBS_DATA_NUM_DOUBLE) {
-				obs_data_set_default_double(settings, name, obs_data_item_get_default_double(enc_default));
-			}
-		} else if (item_type == OBS_DATA_BOOLEAN) {
-			obs_data_set_default_bool(settings, name, obs_data_item_get_default_bool(enc_default));
-		}
+	if (enc_defaults) {
+		copy_defaults(enc_defaults, settings);
+		obs_data_release(enc_defaults);
 	}
-	obs_data_release(enc_defaults);
+	const char *enc_id = obs_data_get_string(settings, "audio_encoder");
+	if (!enc_id || !strlen(enc_id))
+		enc_id = "ffmpeg_aac";
+	enc_defaults = obs_encoder_defaults(enc_id);
+	if (enc_defaults) {
+		if (obs_data_has_default_value(enc_defaults, "bitrate")) {
+			obs_data_set_default_int(settings, "audio_bitrate", obs_data_get_default_int(enc_defaults, "bitrate"));
+			obs_data_unset_default_value(enc_defaults, "bitrate");
+		}
+		copy_defaults(enc_defaults, settings);
+		obs_data_release(enc_defaults);
+	}
 }
 
 static void update_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
@@ -688,20 +705,31 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 			obs_encoder_release(filter->aacTrack);
 			filter->aacTrack = NULL;
 		}
+		enc_id = obs_data_get_string(settings, "audio_encoder");
+		if (!enc_id || !strlen(enc_id))
+			enc_id = "ffmpeg_aac";
+
+		obs_data_t *audio_settings = obs_data_create();
+		if (obs_data_has_user_value(settings, "audio_bitrate") || obs_data_has_default_value(settings, "audio_bitrate")) {
+			obs_data_set_int(audio_settings, "bitrate", obs_data_get_int(settings, "audio_bitrate"));
+		}
 		if (audio_track > 0) {
-			filter->aacTrack = obs_audio_encoder_create("ffmpeg_aac", obs_source_get_name(filter->source), NULL,
+			filter->aacTrack = obs_audio_encoder_create(enc_id, obs_source_get_name(filter->source), audio_settings,
 								    audio_track - 1, NULL);
 		} else {
 			filter->aacTrack =
-				obs_audio_encoder_create("ffmpeg_aac", obs_source_get_name(filter->source), NULL, 0, NULL);
+				obs_audio_encoder_create(enc_id, obs_source_get_name(filter->source), audio_settings, 0, NULL);
 		}
-		if (filter->audio_output)
-			obs_encoder_set_audio(filter->aacTrack, filter->audio_output);
+		obs_data_release(audio_settings);
+		if (filter->aacTrack) {
+			if (filter->audio_output)
+				obs_encoder_set_audio(filter->aacTrack, filter->audio_output);
 
-		if (filter->fileOutput)
-			obs_output_set_audio_encoder(filter->fileOutput, filter->aacTrack, 0);
-		if (filter->replayOutput)
-			obs_output_set_audio_encoder(filter->replayOutput, filter->aacTrack, 0);
+			if (filter->fileOutput)
+				obs_output_set_audio_encoder(filter->fileOutput, filter->aacTrack, 0);
+			if (filter->replayOutput)
+				obs_output_set_audio_encoder(filter->replayOutput, filter->aacTrack, 0);
+		}
 	}
 	filter->audio_track = audio_track;
 }
@@ -921,8 +949,7 @@ static void source_record_filter_defaults(obs_data_t *settings)
 			enc_id = config_get_string(config, "AdvOut", "Encoder");
 		else if (strcmp(enc_id, "jim_nvenc") == 0 || strcmp(enc_id, "obs_nvenc_h264_tex") == 0)
 			enc_id = "nvenc";
-		else
-			obs_data_set_default_string(settings, "encoder", enc_id);
+
 	} else {
 		const char *quality = config_get_string(config, "SimpleOutput", "RecQuality");
 		if (strcmp(quality, "Stream") == 0 || strcmp(quality, "stream") == 0) {
@@ -932,8 +959,11 @@ static void source_record_filter_defaults(obs_data_t *settings)
 		} else {
 			enc_id = config_get_string(config, "SimpleOutput", "RecEncoder");
 		}
-		obs_data_set_default_string(settings, "encoder", enc_id);
 	}
+	obs_data_set_default_string(settings, "encoder", enc_id);
+
+	obs_data_set_default_string(settings, "audio_encoder", "ffmpeg_aac");
+
 	set_encoder_defaults(settings);
 	obs_data_set_default_int(settings, "replay_duration", 5);
 	obs_data_set_default_int(settings, "max_size_mb", 2048);
@@ -1186,8 +1216,8 @@ static void source_record_filter_tick(void *data, float seconds)
 
 	if (context->chapterHotkey == OBS_INVALID_HOTKEY_ID)
 		context->chapterHotkey = obs_hotkey_register_source(parent, "source_record.AddChapterMarker",
-								  obs_frontend_get_locale_string("Basic.Main.AddChapterMarker"),
-								  source_record_chapter_hotkey, context);
+								    obs_frontend_get_locale_string("Basic.Main.AddChapterMarker"),
+								    source_record_chapter_hotkey, context);
 
 	uint32_t width = obs_source_get_width(parent);
 	width += (width & 1);
@@ -1317,6 +1347,7 @@ static bool encoder_changed(void *data, obs_properties_t *props, obs_property_t 
 	UNUSED_PARAMETER(data);
 	UNUSED_PARAMETER(property);
 	obs_properties_remove_by_name(props, "encoder_group");
+	obs_properties_remove_by_name(props, "audio_encoder_group");
 	bool visible = obs_property_visible(obs_properties_get(props, "others"));
 	obs_properties_remove_by_name(props, "others");
 	obs_properties_remove_by_name(props, "plugin_info");
@@ -1327,6 +1358,27 @@ static bool encoder_changed(void *data, obs_properties_t *props, obs_property_t 
 		all_properties_changed(enc_props, settings);
 		obs_properties_add_group(props, "encoder_group", obs_encoder_get_display_name(enc_id), OBS_GROUP_NORMAL, enc_props);
 	}
+
+	enc_id = obs_data_get_string(settings, "audio_encoder");
+	if (!enc_id || !strlen(enc_id))
+		enc_id = "ffmpeg_aac";
+	enc_props = obs_get_encoder_properties(enc_id);
+	if (enc_props) {
+		all_properties_changed(enc_props, settings);
+		const char *name = obs_encoder_get_display_name(enc_id);
+		if (!name || !strlen(name))
+			name = obs_module_text("AudioEncoder");
+		obs_property_t *b = obs_properties_get(enc_props, "bitrate");
+		if (b) {
+			obs_property_int_set_suffix(obs_properties_add_int(enc_props, "audio_bitrate", obs_property_description(b),
+									   obs_property_int_min(b), obs_property_int_max(b),
+									   obs_property_int_step(b)),
+						    obs_property_int_suffix(b));
+			obs_properties_remove_by_name(enc_props, "bitrate");
+		}
+		obs_properties_add_group(props, "audio_encoder_group", name, OBS_GROUP_NORMAL, enc_props);
+	}
+
 	obs_property_t *p = obs_properties_add_text(props, "others", obs_module_text("OtherSourceRecords"), OBS_TEXT_INFO);
 	obs_property_set_visible(p, visible);
 	obs_properties_add_text(
@@ -1349,7 +1401,8 @@ static bool list_add_audio_sources(void *data, obs_source_t *source)
 	return true;
 }
 
-static bool source_record_split_button(obs_properties_t* props, obs_property_t* property, void* data) {
+static bool source_record_split_button(obs_properties_t *props, obs_property_t *property, void *data)
+{
 	UNUSED_PARAMETER(props);
 	UNUSED_PARAMETER(property);
 	struct source_record_filter_context *context = data;
@@ -1401,7 +1454,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Size"), 0, 1073741824, 1);
 	obs_property_int_set_suffix(p, " MB");
 	obs_properties_add_button(split_file, "split_file_now", obs_frontend_get_locale_string("Basic.Main.SplitFile"),
-				   source_record_split_button);
+				  source_record_split_button);
 	obs_properties_add_group(record, "split_file", obs_frontend_get_locale_string("Basic.Settings.Output.EnableSplitFile"),
 				 OBS_GROUP_CHECKABLE, split_file);
 
@@ -1487,6 +1540,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	}
 
 	p = obs_properties_add_list(props, "encoder", obs_module_text("Encoder"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_t *audio_encoder = obs_properties_add_list(props, "audio_encoder", obs_module_text("AudioEncoder"),
+								OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 
 	obs_property_list_add_string(p, obs_module_text("Software"), "x264");
 	if (EncoderAvailable("obs_qsv11"))
@@ -1513,18 +1568,22 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	const char *enc_id = NULL;
 	size_t i = 0;
 	while (obs_enum_encoder_types(i++, &enc_id)) {
-		if (obs_get_encoder_type(enc_id) != OBS_ENCODER_VIDEO)
-			continue;
 		const uint32_t caps = obs_get_encoder_caps(enc_id);
 		if ((caps & (OBS_ENCODER_CAP_DEPRECATED | OBS_ENCODER_CAP_INTERNAL)) != 0)
 			continue;
 		const char *name = obs_encoder_get_display_name(enc_id);
-		obs_property_list_add_string(p, name, enc_id);
+		if (obs_get_encoder_type(enc_id) == OBS_ENCODER_VIDEO) {
+			obs_property_list_add_string(p, name, enc_id);
+		} else {
+			obs_property_list_add_string(audio_encoder, name, enc_id);
+		}
 	}
 	obs_property_set_modified_callback2(p, encoder_changed, data);
+	obs_property_set_modified_callback2(audio_encoder, encoder_changed, data);
 
-	obs_properties_t *group = obs_properties_create();
-	obs_properties_add_group(props, "encoder_group", obs_module_text("Encoder"), OBS_GROUP_NORMAL, group);
+	obs_properties_add_group(props, "encoder_group", obs_module_text("Encoder"), OBS_GROUP_NORMAL, obs_properties_create());
+	obs_properties_add_group(props, "audio_encoder_group", obs_module_text("AudioEncoder"), OBS_GROUP_NORMAL,
+				 obs_properties_create());
 
 	p = obs_properties_add_text(props, "others", obs_module_text("OtherSourceRecords"), OBS_TEXT_INFO);
 	if (data) {
