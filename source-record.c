@@ -1539,7 +1539,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 		dstr_free(&str);
 	}
 
-	p = obs_properties_add_list(props, "encoder", obs_module_text("Encoder"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	p = obs_properties_add_list(props, "encoder", obs_module_text("VideoEncoder"), OBS_COMBO_TYPE_LIST,
+				    OBS_COMBO_FORMAT_STRING);
 	obs_property_t *audio_encoder = obs_properties_add_list(props, "audio_encoder", obs_module_text("AudioEncoder"),
 								OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 
@@ -1581,7 +1582,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_property_set_modified_callback2(p, encoder_changed, data);
 	obs_property_set_modified_callback2(audio_encoder, encoder_changed, data);
 
-	obs_properties_add_group(props, "encoder_group", obs_module_text("Encoder"), OBS_GROUP_NORMAL, obs_properties_create());
+	obs_properties_add_group(props, "encoder_group", obs_module_text("VideoEncoder"), OBS_GROUP_NORMAL,
+				 obs_properties_create());
 	obs_properties_add_group(props, "audio_encoder_group", obs_module_text("AudioEncoder"), OBS_GROUP_NORMAL,
 				 obs_properties_create());
 
