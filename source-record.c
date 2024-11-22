@@ -265,6 +265,7 @@ static void start_stream_output_task(void *data)
 	}
 	context->starting_stream_output = false;
 }
+
 static void release_encoders(void *param)
 {
 	struct source_record_filter_context *context = param;
@@ -290,7 +291,8 @@ void release_output_stopped(void *data, calldata_t *cd)
 	UNUSED_PARAMETER(cd);
 	struct stop_output *so = data;
 	run_queued((obs_task_t)obs_output_release, so->output);
-	run_queued(release_encoders, so->context);
+	if (so->context->encoder || so->context->aacTrack)
+		run_queued(release_encoders, so->context);
 	bfree(data);
 }
 
@@ -1094,6 +1096,7 @@ static void source_record_filter_destroy(void *data)
 	if (context->chapterHotkey != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(context->chapterHotkey);
 
+	context->source = NULL;
 	source_record_delayed_destroy(context);
 }
 
