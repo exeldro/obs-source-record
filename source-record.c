@@ -478,7 +478,13 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 static void start_stream_output(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	if (!filter->service) {
-		filter->service = obs_service_create("rtmp_custom", obs_source_get_name(filter->source), settings, NULL);
+		const char *server = obs_data_get_string(settings, "server");
+		bool whip = strstr(server, "whip") != NULL;
+		if (whip)
+			obs_data_set_string(settings, "bearer_token", obs_data_get_string(settings, "key"));
+
+		filter->service = obs_service_create(whip ? "whip_custom" : "rtmp_custom", obs_source_get_name(filter->source),
+						     settings, NULL);
 	} else {
 		obs_service_update(filter->service, settings);
 	}
