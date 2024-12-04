@@ -43,6 +43,7 @@ struct source_record_filter_context {
 	int audio_track;
 	obs_weak_source_t *audio_source;
 	bool closing;
+	bool exiting;
 	long long replay_buffer_duration;
 	struct vec4 backgroundColor;
 	bool remove_after_record;
@@ -292,9 +293,14 @@ void release_output_stopped(void *data, calldata_t *cd)
 {
 	UNUSED_PARAMETER(cd);
 	struct stop_output *so = data;
-	run_queued((obs_task_t)obs_output_release, so->output);
-	if (so->context->encoder || so->context->audioEncoder[0])
-		run_queued(release_encoders, so->context);
+	if (!so->context->exiting)
+		run_queued((obs_task_t)obs_output_release, so->output);
+	if (so->context->encoder || so->context->audioEncoder[0]) {
+		if (so->context->exiting)
+			release_encoders(so->context);
+		else
+			run_queued(release_encoders, so->context);
+	}
 	bfree(data);
 }
 
@@ -1019,8 +1025,11 @@ static void frontend_event(enum obs_frontend_event event, void *data)
 		context->last_frontend_event = (int)event;
 
 		obs_queue_task(OBS_TASK_GRAPHICS, update_task, data, false);
-	} else if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP ||
-		   event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN) {
+	} else if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN) {
+		context->closing = true;
+		context->exiting = true;
+		obs_source_update(context->source, NULL);
+	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
 		context->closing = true;
 		obs_source_update(context->source, NULL);
 	}
