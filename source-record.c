@@ -908,7 +908,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			obs_encoder_release(filter->encoder);
 			filter->encoder = NULL;
 		}
-		for (int i = 1; i <= MAX_AUDIO_MIXES; i++) {
+		for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
 			if (!filter->audioEncoder[i] || obs_encoder_active(filter->audioEncoder[i]))
 				continue;
 			obs_encoder_release(filter->audioEncoder[i]);
