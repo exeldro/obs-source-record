@@ -778,6 +778,10 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
+	if (obs_obj_is_private(obs_filter_get_parent(filter->source))) {
+		filter->closing = true;
+		return;
+	}
 	if (obs_data_get_bool(settings, "scale")) {
 		const char *res = obs_data_get_string(settings, "resolution");
 		uint32_t width, height;
@@ -1088,7 +1092,7 @@ static void source_record_delayed_destroy(void *data)
 
 	obs_service_release(context->service);
 
-	if (context->video_output) {
+	if (context->video_output && context->view) {
 		obs_view_set_source(context->view, 0, NULL);
 		obs_view_remove(context->view);
 		context->video_output = NULL;
@@ -1249,6 +1253,11 @@ static void source_record_filter_tick(void *data, float seconds)
 	obs_source_t *parent = obs_filter_get_parent(context->source);
 	if (!parent)
 		return;
+
+	if (obs_obj_is_private(parent)) {
+		context->closing = true;
+		return;
+	}
 
 	if (context->enableHotkey == OBS_INVALID_HOTKEY_PAIR_ID)
 		context->enableHotkey = obs_hotkey_pair_register_source(
