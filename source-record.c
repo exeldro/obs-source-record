@@ -7,6 +7,10 @@
 #include "version.h"
 #include "obs-websocket-api.h"
 
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+
 #define OUTPUT_MODE_NONE 0
 #define OUTPUT_MODE_ALWAYS 1
 #define OUTPUT_MODE_STREAMING 2
@@ -501,7 +505,11 @@ static void start_stream_output(struct source_record_filter_context *filter, obs
 	obs_service_apply_encoder_settings(filter->service, settings, NULL);
 
 	const char *type = NULL;
+#ifdef _WIN32
 	void *handle = os_dlopen("obs");
+#else
+	void *handle = dlopen(NULL, RTLD_LAZY);
+#endif
 	if (handle) {
 		const char *(*type_func)(obs_service_t *) =
 			(const char *(*)(obs_service_t *))os_dlsym(handle, "obs_service_get_output_type");
@@ -2414,7 +2422,11 @@ bool obs_module_load(void)
 
 void obs_module_post_load(void)
 {
+#ifdef _WIN32
 	void *handle = os_dlopen("obs");
+#else
+	void *handle = dlopen(NULL, RTLD_LAZY);
+#endif
 	if (handle) {
 		obs_encoder_set_frame_rate_divisor_func =
 			(bool (*)(obs_encoder_t *, uint32_t))os_dlsym(handle, "obs_encoder_set_frame_rate_divisor");
