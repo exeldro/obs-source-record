@@ -402,6 +402,8 @@ static const char *get_encoder_id(obs_data_t *settings)
 	return enc_id;
 }
 
+static void (*obs_encoder_set_gpu_scale_type_func)(obs_encoder_t *encoder, enum obs_scale_type gpu_scale_type) = NULL;
+
 static bool (*obs_encoder_set_frame_rate_divisor_func)(obs_encoder_t *, uint32_t) = NULL;
 
 static void update_video_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
@@ -426,7 +428,9 @@ static void update_video_encoder(struct source_record_filter_context *filter, ob
 		} else {
 			obs_encoder_set_scaled_size(filter->encoder, 0, 0);
 		}
-		//obs_encoder_set_gpu_scale_type(filter->encoder,  (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
+		if (obs_encoder_set_gpu_scale_type_func)
+			obs_encoder_set_gpu_scale_type_func(filter->encoder,
+							    (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
 	} else {
 		obs_encoder_set_scaled_size(filter->encoder, 0, 0);
 	}
@@ -682,7 +686,9 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 			} else {
 				obs_encoder_set_scaled_size(filter->encoder, 0, 0);
 			}
-			//obs_encoder_set_gpu_scale_type(filter->encoder,  (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
+			if (obs_encoder_set_gpu_scale_type_func)
+				obs_encoder_set_gpu_scale_type_func(filter->encoder,
+								    (enum obs_scale_type)obs_data_get_int(settings, "scale_type"));
 		} else {
 			obs_encoder_set_scaled_size(filter->encoder, 0, 0);
 		}
@@ -1583,6 +1589,19 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_property_list_add_string(p, "1920x1080", "1920x1080");
 	obs_property_list_add_string(p, "2560x1440", "2560x1440");
 
+	if (obs_encoder_set_gpu_scale_type_func) {
+		p = obs_properties_add_list(scale, "scale_type", obs_module_text("ScaleType"), OBS_COMBO_TYPE_LIST,
+					    OBS_COMBO_FORMAT_INT);
+		obs_property_list_add_int(p, obs_frontend_get_locale_string("Basic.Settings.Video.DownscaleFilter.Bilinear"),
+					  OBS_SCALE_BILINEAR);
+		obs_property_list_add_int(p, obs_frontend_get_locale_string("Basic.Settings.Video.DownscaleFilter.Area"),
+					  OBS_SCALE_AREA);
+		obs_property_list_add_int(p, obs_frontend_get_locale_string("Basic.Settings.Video.DownscaleFilter.Bicubic"),
+					  OBS_SCALE_BICUBIC);
+		obs_property_list_add_int(p, obs_frontend_get_locale_string("Basic.Settings.Video.DownscaleFilter.Lanczos"),
+					  OBS_SCALE_LANCZOS);
+	}
+
 	obs_properties_add_group(props, "scale", obs_module_text("Scale"), OBS_GROUP_CHECKABLE, scale);
 
 	if (obs_encoder_set_frame_rate_divisor_func) {
@@ -2439,6 +2458,8 @@ void obs_module_post_load(void)
 	if (handle) {
 		obs_encoder_set_frame_rate_divisor_func =
 			(bool (*)(obs_encoder_t *, uint32_t))os_dlsym(handle, "obs_encoder_set_frame_rate_divisor");
+		obs_encoder_set_gpu_scale_type_func =
+			(void (*)(obs_encoder_t *, enum obs_scale_type))os_dlsym(handle, "obs_encoder_set_gpu_scale_type");
 		os_dlclose(handle);
 	}
 }
