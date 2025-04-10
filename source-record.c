@@ -1291,7 +1291,7 @@ static void source_record_filter_tick(void *data, float seconds)
 	width += (width & 1);
 	uint32_t height = obs_source_get_height(parent);
 	height += (height & 1);
-	if (context->width != width || context->height != height || (!context->video_output && width && height)) {
+	if (width && height && (!context->video_output || context->width != width || context->height != height)) {
 		struct obs_video_info ovi = {0};
 		obs_get_video_info(&ovi);
 
@@ -1346,7 +1346,7 @@ static void source_record_filter_tick(void *data, float seconds)
 	} else if (!context->output_active && obs_source_enabled(context->source) &&
 		   (context->replayBuffer || context->record || context->stream)) {
 		if (context->starting_file_output || context->starting_stream_output || context->starting_replay_output ||
-		    !context->video_output)
+		    !context->video_output || !width || !height)
 			return;
 		obs_data_t *s = obs_source_get_settings(context->source);
 		update_encoder(context, s);
