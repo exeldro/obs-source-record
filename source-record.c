@@ -784,7 +784,8 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 static void source_record_filter_update(void *data, obs_data_t *settings)
 {
 	struct source_record_filter_context *filter = data;
-	if (obs_obj_is_private(obs_filter_get_parent(filter->source))) {
+	obs_source_t *parent = obs_filter_get_parent(filter->source);
+	if (obs_obj_is_private(parent)) {
 		filter->closing = true;
 		return;
 	}
@@ -828,6 +829,13 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			  filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPED);
 	} else if (record_mode == OUTPUT_MODE_VIRTUAL_CAMERA) {
 		record = obs_frontend_virtualcam_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED;
+	}
+
+	if (parent && filter->view && (record || replay_buffer)) {
+		obs_source_t *view_source = obs_view_get_source(filter->view, 0);
+		if (view_source != parent)
+			obs_view_set_source(filter->view, 0, parent);
+		obs_source_release(view_source);
 	}
 
 	if (record != filter->record) {
@@ -903,6 +911,13 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			  filter->last_frontend_event != OBS_FRONTEND_EVENT_RECORDING_STOPPED);
 	} else if (stream_mode == OUTPUT_MODE_VIRTUAL_CAMERA) {
 		stream = obs_frontend_virtualcam_active() && filter->last_frontend_event != OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED;
+	}
+
+	if (parent && filter->view && stream) {
+		obs_source_t *view_source = obs_view_get_source(filter->view, 0);
+		if (view_source != parent)
+			obs_view_set_source(filter->view, 0, parent);
+		obs_source_release(view_source);
 	}
 
 	if (stream != filter->stream) {
@@ -1307,8 +1322,6 @@ static void source_record_filter_tick(void *data, float seconds)
 		if (restart)
 			obs_view_remove(context->view);
 
-		obs_view_set_source(context->view, 0, parent);
-
 		context->video_output = obs_view_add2(context->view, &ovi);
 		if (context->video_output) {
 			context->width = width;
@@ -1350,6 +1363,12 @@ static void source_record_filter_tick(void *data, float seconds)
 			return;
 		obs_data_t *s = obs_source_get_settings(context->source);
 		update_encoder(context, s);
+		if (context->record || context->stream || context->replayBuffer) {
+			obs_source_t *view_source = obs_view_get_source(context->view, 0);
+			if (view_source != parent)
+				obs_view_set_source(context->view, 0, parent);
+			obs_source_release(view_source);
+		}
 		if (context->record)
 			start_file_output(context, s);
 		if (context->stream)
