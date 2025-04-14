@@ -1776,6 +1776,7 @@ struct obs_source_info source_record_filter_info = {
 	.video_tick = source_record_filter_tick,
 	.get_properties = source_record_filter_properties,
 	.filter_remove = source_record_filter_filter_remove,
+	.video_render = source_record_filter_render,
 };
 
 OBS_DECLARE_MODULE()
