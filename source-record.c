@@ -300,7 +300,7 @@ void release_output_stopped(void *data, calldata_t *cd)
 	if (!so->context->exiting)
 		run_queued((obs_task_t)obs_output_release, so->output);
 	if (so->context->encoder || so->context->audioEncoder[0]) {
-		if (so->context->exiting)
+		if (so->context->exiting || so->context->closing)
 			release_encoders(so->context);
 		else
 			run_queued(release_encoders, so->context);
