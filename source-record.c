@@ -576,7 +576,7 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 	obs_data_t *s = obs_data_create();
 
 	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
-	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
+	obs_data_set_string(s, "format", obs_data_get_string(settings, "replay_filename_formatting"));
 	obs_data_set_string(s, "extension", GetFormatExt(obs_data_get_string(settings, "rec_format")));
 	obs_data_set_bool(s, "allow_spaces", true);
 	filter->replay_buffer_duration = obs_data_get_int(settings, "replay_duration");
@@ -892,6 +892,9 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			filter->replayOutput = NULL;
 			start_replay_output(filter, settings);
 		}
+		obs_data_t *replay_settings = obs_output_get_settings(filter->replayOutput);
+		obs_data_set_string(replay_settings, "format", obs_data_get_string(settings, "replay_filename_formatting"));
+		obs_data_release(replay_settings);
 	}
 
 	bool stream = false;
@@ -1004,7 +1007,9 @@ static void source_record_filter_defaults(obs_data_t *settings)
 	const char *rec_path = adv_out ? adv_path : config_get_string(config, "SimpleOutput", "FilePath");
 
 	obs_data_set_default_string(settings, "path", rec_path);
-	obs_data_set_default_string(settings, "filename_formatting", config_get_string(config, "Output", "FilenameFormatting"));
+	const char *format = config_get_string(config, "Output", "FilenameFormatting");
+	obs_data_set_default_string(settings, "filename_formatting", format);
+	obs_data_set_default_string(settings, "replay_filename_formatting", format);
 	obs_data_set_default_string(settings, "rec_format",
 				    config_get_string(config, adv_out ? "AdvOut" : "SimpleOutput", "RecFormat2"));
 
@@ -1553,6 +1558,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 
 	p = obs_properties_add_int(replay, "replay_duration", obs_module_text("Duration"), 1, 1000, 1);
 	obs_property_int_set_suffix(p, "s");
+
+	obs_properties_add_text(replay, "replay_filename_formatting", obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
 
 	obs_properties_add_group(props, "replay_buffer", obs_module_text("ReplayBuffer"), OBS_GROUP_CHECKABLE, replay);
 
