@@ -18,6 +18,9 @@
 #define OUTPUT_MODE_STREAMING_OR_RECORDING 4
 #define OUTPUT_MODE_VIRTUAL_CAMERA 5
 
+#define BACKGROUND_CHANNEL 0
+#define SOURCE_CHANNEL 1
+
 struct source_record_filter_context {
 	obs_source_t *source;
 	video_t *video_output;
@@ -364,7 +367,7 @@ static void remove_filter(void *data, calldata_t *calldata)
 	signal_handler_disconnect(sh, "stop", remove_filter, filter);
 	obs_source_t *source = obs_filter_get_parent(filter->source);
 	if (!source && filter->view) {
-		source = obs_view_get_source(filter->view, 0);
+		source = obs_view_get_source(filter->view, SOURCE_CHANNEL);
 		obs_source_release(source);
 	}
 	obs_source_filter_remove(source, filter->source);
@@ -832,10 +835,29 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	}
 
 	if (parent && filter->view && (record || replay_buffer)) {
-		obs_source_t *view_source = obs_view_get_source(filter->view, 0);
+		obs_source_t *view_source = obs_view_get_source(filter->view, SOURCE_CHANNEL);
 		if (view_source != parent)
-			obs_view_set_source(filter->view, 0, parent);
+			obs_view_set_source(filter->view, SOURCE_CHANNEL, parent);
 		obs_source_release(view_source);
+	}
+
+	if (parent && filter->view) {
+		obs_source_t *background_source = obs_view_get_source(filter->view, BACKGROUND_CHANNEL);
+		if (!background_source) {
+			background_source = obs_source_create_private("color_source", "Source Record Background", NULL);
+			obs_view_set_source(filter->view, BACKGROUND_CHANNEL, background_source);
+		}
+		obs_data_t *css = obs_source_get_settings(background_source);
+		if (obs_data_get_int(css, "color") != obs_data_get_int(settings, "backgroundColor") ||
+		    obs_data_get_int(css, "width") != obs_source_get_width(parent) ||
+		    obs_data_get_int(css, "height") != obs_source_get_height(parent)) {
+			obs_data_set_int(css, "color", obs_data_get_int(settings, "backgroundColor"));
+			obs_data_set_int(css, "width", obs_source_get_width(parent));
+			obs_data_set_int(css, "height", obs_source_get_height(parent));
+			obs_source_update(background_source, css);
+		}
+		obs_data_release(css);
+		obs_source_release(background_source);
 	}
 
 	if (record != filter->record) {
@@ -917,9 +939,9 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 	}
 
 	if (parent && filter->view && stream) {
-		obs_source_t *view_source = obs_view_get_source(filter->view, 0);
+		obs_source_t *view_source = obs_view_get_source(filter->view, SOURCE_CHANNEL);
 		if (view_source != parent)
-			obs_view_set_source(filter->view, 0, parent);
+			obs_view_set_source(filter->view, SOURCE_CHANNEL, parent);
 		obs_source_release(view_source);
 	}
 
@@ -1119,7 +1141,8 @@ static void source_record_delayed_destroy(void *data)
 	obs_service_release(context->service);
 
 	if (context->video_output && context->view) {
-		obs_view_set_source(context->view, 0, NULL);
+		obs_view_set_source(context->view, BACKGROUND_CHANNEL, NULL);
+		obs_view_set_source(context->view, SOURCE_CHANNEL, NULL);
 		obs_view_remove(context->view);
 		context->video_output = NULL;
 	}
@@ -1369,11 +1392,29 @@ static void source_record_filter_tick(void *data, float seconds)
 		obs_data_t *s = obs_source_get_settings(context->source);
 		update_encoder(context, s);
 		if (context->record || context->stream || context->replayBuffer) {
-			obs_source_t *view_source = obs_view_get_source(context->view, 0);
+			obs_source_t *view_source = obs_view_get_source(context->view, SOURCE_CHANNEL);
 			if (view_source != parent)
-				obs_view_set_source(context->view, 0, parent);
+				obs_view_set_source(context->view, SOURCE_CHANNEL, parent);
 			obs_source_release(view_source);
 		}
+
+		obs_source_t *background_source = obs_view_get_source(context->view, BACKGROUND_CHANNEL);
+		if (!background_source) {
+			background_source = obs_source_create_private("color_source", "Source Record Background", NULL);
+			obs_view_set_source(context->view, BACKGROUND_CHANNEL, background_source);
+		}
+		obs_data_t *css = obs_source_get_settings(background_source);
+		if (obs_data_get_int(css, "color") != obs_data_get_int(s, "backgroundColor") ||
+		    obs_data_get_int(css, "width") != obs_source_get_width(parent) ||
+		    obs_data_get_int(css, "height") != obs_source_get_height(parent)) {
+			obs_data_set_int(css, "color", obs_data_get_int(s, "backgroundColor"));
+			obs_data_set_int(css, "width", obs_source_get_width(parent));
+			obs_data_set_int(css, "height", obs_source_get_height(parent));
+			obs_source_update(background_source, css);
+		}
+		obs_data_release(css);
+		obs_source_release(background_source);
+
 		if (context->record)
 			start_file_output(context, s);
 		if (context->stream)
@@ -1765,6 +1806,10 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 		so->context = context;
 		run_queued(force_stop_output_task, so);
 		context->replayOutput = NULL;
+	}
+	if (context->view) {
+		obs_view_set_source(context->view, BACKGROUND_CHANNEL, NULL);
+		obs_view_set_source(context->view, SOURCE_CHANNEL, NULL);
 	}
 	obs_frontend_remove_event_callback(frontend_event, context);
 }
@@ -2494,4 +2539,9 @@ void obs_module_post_load(void)
 void obs_module_unload(void)
 {
 	da_free(source_record_filters);
+}
+
+const char *obs_module_name(void)
+{
+	return obs_module_text("SourceRecord");
 }
