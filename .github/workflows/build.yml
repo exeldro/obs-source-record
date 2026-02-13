@@ -147,7 +147,7 @@ jobs:
           path: plugins/${{ env.PLUGIN_NAME }}
       - name: Add plugin to obs cmake
         shell: bash
-        run: echo "add_subdirectory(${{ env.PLUGIN_NAME }})" >> plugins/CMakeLists.txt
+        run: echo "add_subdirectory(${{ env.PLUGIN_NAME }})" > plugins/CMakeLists.txt
       - name: Fetch Git Tags
         run: git fetch --prune --tags --unshallow
       - name: 'Install dependencies'
@@ -210,7 +210,7 @@ jobs:
           path: plugins/${{ env.PLUGIN_NAME}}
       - name: Add plugin to obs cmake
         shell: cmd
-        run: echo add_subdirectory(${{ env.PLUGIN_NAME }}) >> plugins/CMakeLists.txt
+        run: echo add_subdirectory(${{ env.PLUGIN_NAME }}) > plugins/CMakeLists.txt
       - name: Fetch Git Tags
         run: git fetch --prune --tags --unshallow
       - name: 'Install prerequisite: QT'
