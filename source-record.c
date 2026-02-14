@@ -241,6 +241,8 @@ static const char *GetFormatExt(const char *format)
 		return "mp4";
 	if (strcmp(format, "hybrid_mp4") == 0)
 		return "mp4";
+	if (strcmp(format, "hybrid_mov") == 0)
+		return "mov";
 	if (strcmp(format, "fragmented_mov") == 0)
 		return "mov";
 	if (strcmp(format, "hls") == 0)
@@ -463,8 +465,12 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	obs_data_set_int(s, "max_size_mb", obs_data_get_int(settings, "max_size_mb"));
 	obs_data_set_int(s, "max_time_sec", obs_data_get_int(settings, "max_time_sec"));
 
-	bool use_native = strcmp(format, "hybrid_mp4") == 0;
-	const char *output_id = use_native ? "mp4_output" : "ffmpeg_muxer";
+	const char *output_id = "ffmpeg_muxer";
+	if (strcmp(format, "hybrid_mp4") == 0) {
+		output_id = "mp4_output";
+	} else if (strcmp(format, "hybrid_mov") == 0) {
+		output_id = "mov_output";
+	}
 	if (!filter->fileOutput || strcmp(obs_output_get_id(filter->fileOutput), output_id) != 0) {
 		obs_output_release(filter->fileOutput);
 		filter->fileOutput = obs_output_create(output_id, obs_source_get_name(filter->source), s, NULL);
@@ -1572,6 +1578,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_property_list_add_string(p, "flv", "flv");
 	obs_property_list_add_string(p, "mp4", "mp4");
 	obs_property_list_add_string(p, "hybrid_mp4", "hybrid_mp4");
+	obs_property_list_add_string(p, "hybrid_mov", "hybrid_mov");
 	obs_property_list_add_string(p, "fragmented_mp4", "fragmented_mp4");
 	obs_property_list_add_string(p, "fragmented_mov", "fragmented_mov");
 	obs_property_list_add_string(p, "mov", "mov");
