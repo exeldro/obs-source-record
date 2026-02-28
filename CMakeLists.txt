@@ -6,7 +6,7 @@ else()
   cmake_minimum_required(VERSION 3.18)
 endif()
 
-project(source-record VERSION 0.4.6)
+project(source-record VERSION 0.4.7)
 set(PROJECT_FULL_NAME "Source Record")
 
 # Set new UUIDs when you start to create a new plugin.
