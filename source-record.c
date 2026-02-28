@@ -847,7 +847,7 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		obs_source_release(view_source);
 	}
 
-	if (parent && filter->view) {
+	if (parent && filter->view && !filter->closing) {
 		obs_source_t *background_source = obs_view_get_source(filter->view, BACKGROUND_CHANNEL);
 		if (!background_source) {
 			background_source = obs_source_create_private("color_source", "Source Record Background", NULL);
@@ -1555,6 +1555,17 @@ static bool source_record_split_button(obs_properties_t *props, obs_property_t *
 	return true;
 }
 
+bool output_exists(const char *id)
+{
+	const char *output_id;
+	size_t i = 0;
+	while (obs_enum_output_types(i++, &output_id)) {
+		if (strcmp(id, output_id) == 0)
+			return true;
+	}
+	return false;
+}
+
 static obs_properties_t *source_record_filter_properties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
@@ -1577,8 +1588,10 @@ static obs_properties_t *source_record_filter_properties(void *data)
 				    OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p, "flv", "flv");
 	obs_property_list_add_string(p, "mp4", "mp4");
-	obs_property_list_add_string(p, "hybrid_mp4", "hybrid_mp4");
-	obs_property_list_add_string(p, "hybrid_mov", "hybrid_mov");
+	if (output_exists("mp4_output"))
+		obs_property_list_add_string(p, "hybrid_mp4", "hybrid_mp4");
+	if (output_exists("mov_output"))
+		obs_property_list_add_string(p, "hybrid_mov", "hybrid_mov");
 	obs_property_list_add_string(p, "fragmented_mp4", "fragmented_mp4");
 	obs_property_list_add_string(p, "fragmented_mov", "fragmented_mov");
 	obs_property_list_add_string(p, "mov", "mov");
