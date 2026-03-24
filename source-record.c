@@ -62,7 +62,7 @@ DARRAY(obs_source_t *) source_record_filters;
 
 static void run_queued(obs_task_t task, void *param)
 {
-	if (obs_in_task_thread(OBS_TASK_UI)) {
+	if (obs_in_task_thread(OBS_TASK_UI) && obs_get_video()) {
 		obs_queue_task(OBS_TASK_GRAPHICS, task, param, false);
 	} else {
 		obs_queue_task(OBS_TASK_UI, task, param, false);
@@ -1801,15 +1801,6 @@ static void source_record_filter_render(void *data, gs_effect_t *effect)
 	obs_source_skip_video_filter(context->source);
 }
 
-static void clear_view(void *data)
-{
-	obs_view_t* view = data;
-	if (!view)
-		return;
-	obs_view_set_source(view, BACKGROUND_CHANNEL, NULL);
-	obs_view_set_source(view, SOURCE_CHANNEL, NULL);
-}
-
 static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 {
 	UNUSED_PARAMETER(parent);
@@ -1835,9 +1826,6 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 		so->context = context;
 		run_queued(force_stop_output_task, so);
 		context->replayOutput = NULL;
-	}
-	if (context->view) {
-		run_queued(clear_view, context->view);
 	}
 	obs_frontend_remove_event_callback(frontend_event, context);
 }
