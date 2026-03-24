@@ -1801,6 +1801,15 @@ static void source_record_filter_render(void *data, gs_effect_t *effect)
 	obs_source_skip_video_filter(context->source);
 }
 
+static void clear_view(void *data)
+{
+	obs_view_t* view = data;
+	if (!view)
+		return;
+	obs_view_set_source(view, BACKGROUND_CHANNEL, NULL);
+	obs_view_set_source(view, SOURCE_CHANNEL, NULL);
+}
+
 static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 {
 	UNUSED_PARAMETER(parent);
@@ -1828,8 +1837,7 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 		context->replayOutput = NULL;
 	}
 	if (context->view) {
-		obs_view_set_source(context->view, BACKGROUND_CHANNEL, NULL);
-		obs_view_set_source(context->view, SOURCE_CHANNEL, NULL);
+		run_queued(clear_view, context->view);
 	}
 	obs_frontend_remove_event_callback(frontend_event, context);
 }
