@@ -291,7 +291,7 @@ jobs:
           path: package/*
       - name: "Package Installer (Prereqs)"
         run: |
-          curl "-kL" "https://files.jrsoftware.org/is/6/innosetup-6.0.3.exe" "-f" "--retry" "5" "-o" "inno.exe"
+          curl "-kL" "https://github.com/jrsoftware/issrc/releases/download/is-6_7_1/innosetup-6.7.1.exe" "-f" "--retry" "5" "-o" "inno.exe"
           .\inno.exe /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART
       - name: "Package Installer (Compile)"
         run: |
