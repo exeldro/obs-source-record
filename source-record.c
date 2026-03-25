@@ -1611,13 +1611,13 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_properties_add_group(record, "split_file", obs_frontend_get_locale_string("Basic.Settings.Output.EnableSplitFile"),
 				 OBS_GROUP_CHECKABLE, split_file);
 
-	obs_properties_add_int(record, "record_max_seconds", obs_module_text("MaxSeconds"), 0, 100000, 1);
+	obs_properties_add_int(record, "record_max_seconds", obs_module_text("MaxSeconds"), 0, 31536000, 1);
 
 	obs_properties_add_group(props, "record", obs_module_text("Record"), OBS_GROUP_NORMAL, record);
 
 	obs_properties_t *replay = obs_properties_create();
 
-	p = obs_properties_add_int(replay, "replay_duration", obs_module_text("Duration"), 1, 1000, 1);
+	p = obs_properties_add_int(replay, "replay_duration", obs_module_text("Duration"), 1, 10000, 1);
 	obs_property_int_set_suffix(p, "s");
 
 	obs_properties_add_text(replay, "replay_filename_formatting", obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
