@@ -289,10 +289,6 @@ jobs:
         with:
           name: '${{ env.FILE_NAME }}'
           path: package/*
-      - name: "Package Installer (Prereqs)"
-        run: |
-          curl "-kL" "https://github.com/jrsoftware/issrc/releases/download/is-6_7_1/innosetup-6.7.1.exe" "-f" "--retry" "5" "-o" "inno.exe"
-          .\inno.exe /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART
       - name: "Package Installer (Compile)"
         run: |
           & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /Qp ".\installer.iss"
