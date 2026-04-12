@@ -384,8 +384,6 @@ static void stop_output_sync(struct source_record_filter_context *context, obs_o
 		signal_handler_disconnect(sh, "stop", remove_filter, context);
 	if (obs_output_active(output))
 		obs_output_force_stop(output);
-	if (!context->exiting)
-		obs_output_release(output);
 }
 
 static const char *get_encoder_id(obs_data_t *settings)
@@ -886,7 +884,6 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		} else if (filter->fileOutput) {
 			if (filter->closing) {
 				stop_output_sync(filter, filter->fileOutput);
-				filter->fileOutput = NULL;
 			} else {
 				struct stop_output *so = bmalloc(sizeof(struct stop_output));
 				so->output = filter->fileOutput;
@@ -918,7 +915,6 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			obs_data_release(hotkeys);
 			if (filter->closing) {
 				stop_output_sync(filter, filter->replayOutput);
-				filter->replayOutput = NULL;
 			} else {
 				struct stop_output *so = bmalloc(sizeof(struct stop_output));
 				so->output = filter->replayOutput;
@@ -979,7 +975,6 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 		} else if (filter->streamOutput) {
 			if (filter->closing) {
 				stop_output_sync(filter, filter->streamOutput);
-				filter->streamOutput = NULL;
 			} else {
 				struct stop_output *so = bmalloc(sizeof(struct stop_output));
 				so->output = filter->streamOutput;
@@ -1155,11 +1150,8 @@ static void source_record_filter_destroy(void *data)
 	obs_frontend_remove_event_callback(frontend_event, context);
 
 	stop_output_sync(context, context->fileOutput);
-	context->fileOutput = NULL;
 	stop_output_sync(context, context->streamOutput);
-	context->streamOutput = NULL;
 	stop_output_sync(context, context->replayOutput);
-	context->replayOutput = NULL;
 
 	if (context->enableHotkey != OBS_INVALID_HOTKEY_PAIR_ID)
 		obs_hotkey_pair_unregister(context->enableHotkey);
@@ -1186,6 +1178,13 @@ static void source_record_filter_destroy(void *data)
 			break;
 		os_sleep_ms(10);
 	}
+
+	obs_output_release(context->fileOutput);
+	obs_output_release(context->streamOutput);
+	obs_output_release(context->replayOutput);
+	context->fileOutput = NULL;
+	context->streamOutput = NULL;
+	context->replayOutput = NULL;
 
 	for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
 		obs_encoder_release(context->audioEncoder[i]);
@@ -1817,11 +1816,8 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 	struct source_record_filter_context *context = data;
 	context->closing = true;
 	stop_output_sync(context, context->fileOutput);
-	context->fileOutput = NULL;
 	stop_output_sync(context, context->streamOutput);
-	context->streamOutput = NULL;
 	stop_output_sync(context, context->replayOutput);
-	context->replayOutput = NULL;
 	obs_frontend_remove_event_callback(frontend_event, context);
 }
 
