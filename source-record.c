@@ -375,9 +375,6 @@ static void remove_filter(void *data, calldata_t *calldata)
 	obs_source_filter_remove(source, filter->source);
 }
 
-// Used in destroy/closing paths instead of run_queued(force_stop_output_task)
-// to prevent a use-after-free where queued tasks reference the context after
-// it has been freed (which also causes OBS to hang on exit).
 static void stop_output_sync(struct source_record_filter_context *context, obs_output_t *output)
 {
 	if (!output)
@@ -387,7 +384,8 @@ static void stop_output_sync(struct source_record_filter_context *context, obs_o
 		signal_handler_disconnect(sh, "stop", remove_filter, context);
 	if (obs_output_active(output))
 		obs_output_force_stop(output);
-	obs_output_release(output);
+	if (!context->exiting)
+		obs_output_release(output);
 }
 
 static const char *get_encoder_id(obs_data_t *settings)
@@ -1174,6 +1172,20 @@ static void source_record_filter_destroy(void *data)
 
 	if (context->chapterHotkey != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(context->chapterHotkey);
+
+	for (int retries = 0; retries < 300; retries++) {
+		bool any_active = false;
+		if (context->encoder && obs_encoder_active(context->encoder))
+			any_active = true;
+		for (int i = 0; i < MAX_AUDIO_MIXES && !any_active; i++) {
+			if (context->audioEncoder[i] &&
+			    obs_encoder_active(context->audioEncoder[i]))
+				any_active = true;
+		}
+		if (!any_active)
+			break;
+		os_sleep_ms(10);
+	}
 
 	for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
 		obs_encoder_release(context->audioEncoder[i]);
