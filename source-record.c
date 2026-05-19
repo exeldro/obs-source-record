@@ -688,8 +688,13 @@ static void set_encoder_defaults(obs_data_t *settings)
 static void update_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	const char *enc_id = get_encoder_id(settings);
-	if (!filter->encoder || strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0) {
+	const bool need_new_encoder = !filter->encoder || strcmp(obs_encoder_get_id(filter->encoder), enc_id) != 0;
+	if (need_new_encoder && filter->encoder && obs_encoder_active(filter->encoder)) {
+		/* Fix: an active encoder is never released here. Releasing an
+		 * in-use encoder caused crashes; it is swapped once idle. */
+	} else if (need_new_encoder) {
 		obs_encoder_release(filter->encoder);
+		filter->encoder = NULL;
 		set_encoder_defaults(settings);
 		filter->encoder = obs_video_encoder_create(enc_id, obs_source_get_name(filter->source), settings, NULL);
 
@@ -719,6 +724,9 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 		if (filter->replayOutput && obs_output_get_video_encoder(filter->replayOutput) != filter->encoder)
 			obs_output_set_video_encoder(filter->replayOutput, filter->encoder);
 	} else if (!obs_encoder_active(filter->encoder)) {
+		/* Fix: re-point the encoder at the current video_output in case
+		 * the view was recreated after a parent size change. */
+		obs_encoder_set_video(filter->encoder, filter->video_output);
 		obs_encoder_update(filter->encoder, settings);
 	}
 	const int audio_track = obs_data_get_bool(settings, "different_audio") ? (int)obs_data_get_int(settings, "audio_track") : 0;
@@ -1349,7 +1357,13 @@ static void source_record_filter_tick(void *data, float seconds)
 	width += (width & 1);
 	uint32_t height = obs_source_get_height(parent);
 	height += (height & 1);
-	if (width && height && (!context->video_output || context->width != width || context->height != height)) {
+	/* Fix: never destroy the video_output while an encoder is still feeding
+	 * from it. A size change on the parent (window capture / PipeWire on
+	 * focus change) used to call obs_view_remove() immediately, freeing the
+	 * video_output under a running encoder + replay buffer -> crash. */
+	const bool size_changed = width && height && (context->width != width || context->height != height);
+
+	if (width && height && !context->video_output) {
 		struct obs_video_info ovi = {0};
 		obs_get_video_info(&ovi);
 
@@ -1361,17 +1375,35 @@ static void source_record_filter_tick(void *data, float seconds)
 		if (!context->view)
 			context->view = obs_view_create();
 
-		const bool restart = !!context->video_output;
-		if (restart)
-			obs_view_remove(context->view);
-
 		context->video_output = obs_view_add2(context->view, &ovi);
 		if (context->video_output) {
 			context->width = width;
 			context->height = height;
-			if (restart)
-				context->restart = true;
 		}
+	} else if (size_changed && context->video_output) {
+		if (context->output_active) {
+			/* defer: let the restart branch stop the outputs first */
+			context->restart = true;
+		} else if (!context->encoder || !obs_encoder_active(context->encoder)) {
+			/* outputs are down and the encoder is idle: safe to swap */
+			struct obs_video_info ovi = {0};
+			obs_get_video_info(&ovi);
+
+			ovi.base_width = width;
+			ovi.base_height = height;
+			ovi.output_width = width;
+			ovi.output_height = height;
+
+			obs_view_remove(context->view);
+			context->video_output = obs_view_add2(context->view, &ovi);
+			if (context->video_output) {
+				context->width = width;
+				context->height = height;
+				if (context->encoder)
+					obs_encoder_set_video(context->encoder, context->video_output);
+			}
+		}
+		/* else: encoder still winding down, retry on the next tick */
 	}
 
 	if (context->restart && context->output_active) {
@@ -1403,6 +1435,10 @@ static void source_record_filter_tick(void *data, float seconds)
 		   (context->replayBuffer || context->record || context->stream)) {
 		if (context->starting_file_output || context->starting_stream_output || context->starting_replay_output ||
 		    !context->video_output || !width || !height)
+			return;
+		/* Fix: don't start new outputs (and reuse / re-point the encoder)
+		 * while a previous output is still draining it -> use-after-free. */
+		if (context->encoder && obs_encoder_active(context->encoder))
 			return;
 		obs_data_t *s = obs_source_get_settings(context->source);
 		update_encoder(context, s);
