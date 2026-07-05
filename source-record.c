@@ -60,6 +60,8 @@ struct source_record_filter_context {
 
 DARRAY(obs_source_t *) source_record_filters;
 
+static void *vendor;
+
 static void run_queued(obs_task_t task, void *param)
 {
 	if (obs_in_task_thread(OBS_TASK_UI) && obs_get_video()) {
@@ -145,15 +147,18 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 	}
 
 	obs_source_t *audio_source = NULL;
+	bool release_audio = false;
 	if (filter->audio_source) {
 		audio_source = obs_weak_source_get_source(filter->audio_source);
 		if (audio_source)
-			obs_source_release(audio_source);
+			release_audio = true;
 	} else {
 		audio_source = obs_filter_get_parent(filter->source);
 	}
 	if (!audio_source || obs_source_removed(audio_source)) {
 		*out_ts = start_ts_in;
+		if (release_audio)
+			obs_source_release(audio_source);
 		return true;
 	}
 
@@ -192,21 +197,30 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 		} else {
 			*out_ts = start_ts_in;
 		}
+		if (release_audio)
+			obs_source_release(audio_source);
 		return true;
 	}
 	if ((flags & OBS_SOURCE_AUDIO) == 0) {
 		*out_ts = start_ts_in;
+		if (release_audio)
+			obs_source_release(audio_source);
 		return true;
 	}
 
 	const uint64_t source_ts = obs_source_get_audio_timestamp(audio_source);
 	if (!source_ts) {
 		*out_ts = start_ts_in;
+		if (release_audio)
+			obs_source_release(audio_source);
 		return true;
 	}
 
-	if (obs_source_audio_pending(audio_source))
+	if (obs_source_audio_pending(audio_source)) {
+		if (release_audio)
+			obs_source_release(audio_source);
 		return false;
+	}
 
 	struct obs_source_audio_mix audio;
 	obs_source_get_audio_mix(audio_source, &audio);
@@ -231,6 +245,8 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 	}
 
 	*out_ts = source_ts;
+	if (release_audio)
+		obs_source_release(audio_source);
 
 	return true;
 }
@@ -297,6 +313,49 @@ struct stop_output {
 	struct source_record_filter_context *context;
 	obs_output_t *output;
 };
+
+static void source_record_replay_saved(void *data, calldata_t *cd)
+{
+	struct source_record_filter_context *context = data;
+	if (!context || !context->source)
+		return;
+
+	const char *path = calldata_string(cd, "path");
+	char *path_fallback = NULL;
+	if ((!path || !strlen(path)) && context->replayOutput) {
+		proc_handler_t *ph = obs_output_get_proc_handler(context->replayOutput);
+		if (ph) {
+			calldata_t proc_cd;
+			calldata_init(&proc_cd);
+			if (proc_handler_call(ph, "get_last_replay", &proc_cd)) {
+				const char *last_path = calldata_string(&proc_cd, "path");
+				if (last_path && strlen(last_path))
+					path_fallback = bstrdup(last_path);
+			}
+			calldata_free(&proc_cd);
+		}
+	}
+
+	const char *emit_path = "";
+	if (path && strlen(path)) {
+		emit_path = path;
+	} else if (path_fallback) {
+		emit_path = path_fallback;
+	}
+
+	obs_data_t *event_data = obs_data_create();
+	obs_data_set_string(event_data, "path", emit_path);
+	obs_data_set_string(event_data, "filter", obs_source_get_name(context->source));
+
+	obs_source_t *parent = obs_filter_get_parent(context->source);
+	if (parent) {
+		obs_data_set_string(event_data, "source", obs_source_get_name(parent));
+	}
+
+	obs_websocket_vendor_emit_event(vendor, "replay_buffer_saved", event_data);
+	obs_data_release(event_data);
+	bfree(path_fallback);
+}
 
 void release_output_stopped(void *data, calldata_t *cd)
 {
@@ -615,8 +674,11 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 		}
 
 		filter->replayOutput = obs_output_create("replay_buffer", name.array, s, hotkeys);
+		signal_handler_t *sh = obs_output_get_signal_handler(filter->replayOutput);
+		if (sh)
+			signal_handler_connect(sh, "saved", source_record_replay_saved, filter);
 		if (filter->remove_after_record) {
-			signal_handler_t *sh = obs_output_get_signal_handler(filter->replayOutput);
+			sh = obs_output_get_signal_handler(filter->replayOutput);
 			signal_handler_connect(sh, "stop", remove_filter, filter);
 		}
 		dstr_free(&name);
@@ -1165,20 +1227,6 @@ static void source_record_filter_destroy(void *data)
 	if (context->chapterHotkey != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(context->chapterHotkey);
 
-	for (int retries = 0; retries < 300; retries++) {
-		bool any_active = false;
-		if (context->encoder && obs_encoder_active(context->encoder))
-			any_active = true;
-		for (int i = 0; i < MAX_AUDIO_MIXES && !any_active; i++) {
-			if (context->audioEncoder[i] &&
-			    obs_encoder_active(context->audioEncoder[i]))
-				any_active = true;
-		}
-		if (!any_active)
-			break;
-		os_sleep_ms(10);
-	}
-
 	obs_output_release(context->fileOutput);
 	obs_output_release(context->streamOutput);
 	obs_output_release(context->replayOutput);
@@ -1616,7 +1664,7 @@ static obs_properties_t *source_record_filter_properties(void *data)
 				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Size"), 0, 1073741824, 1);
 	obs_property_int_set_suffix(p, " MB");
 	obs_properties_add_button(split_file, "split_file_now", obs_frontend_get_locale_string("Basic.Main.SplitFile"),
-				  source_record_split_button);
+				 source_record_split_button);
 	obs_properties_add_group(record, "split_file", obs_frontend_get_locale_string("Basic.Settings.Output.EnableSplitFile"),
 				 OBS_GROUP_CHECKABLE, split_file);
 
@@ -1844,8 +1892,6 @@ MODULE_EXPORT const char *obs_module_description(void)
 {
 	return "Source Record Filter";
 }
-
-static void *vendor;
 
 static void find_filter(obs_source_t *parent, obs_source_t *child, void *param)
 {
