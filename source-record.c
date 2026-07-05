@@ -2296,13 +2296,20 @@ static bool save_replay_buffer_source(obs_source_t *source, obs_data_t *request_
 	if (!filter)
 		return false;
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
-	if (!context->replayOutput)
+	if (!context->replayOutput) {
+		blog(LOG_WARNING, "[Source Record] replay_buffer_save requested but replay output is not active");
+		obs_source_release(filter);
 		return false;
+	}
 
 	proc_handler_t *ph = obs_output_get_proc_handler(context->replayOutput);
 	calldata_t cd = {0};
 	bool success = proc_handler_call(ph, "save", &cd);
 	calldata_free(&cd);
+	if (!success)
+		blog(LOG_WARNING, "[Source Record] replay_buffer_save proc call failed");
+	else
+		blog(LOG_INFO, "[Source Record] replay_buffer_save requested successfully");
 	obs_source_release(filter);
 	return success;
 }
@@ -2399,6 +2406,10 @@ static void websocket_save_replay_buffer(obs_data_t *request_data, obs_data_t *r
 		}
 		da_free(sources);
 	}
+	if (!success)
+		blog(LOG_WARNING, "[Source Record] websocket replay_buffer_save finished with failures");
+	else
+		blog(LOG_INFO, "[Source Record] websocket replay_buffer_save finished successfully");
 	obs_data_set_bool(response_data, "success", success);
 }
 
