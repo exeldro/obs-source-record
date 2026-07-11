@@ -2019,7 +2019,11 @@ obs_source_t *get_source_record_filter(obs_source_t *source, obs_data_t *request
 			obs_source_filter_add(source, filter);
 		}
 	}
-	if (!obs_source_enabled(filter))
+	/* Only (re-)enable the filter for requests that actually start an
+	 * output. Stop/pause/split/chapter requests pass create=false and must
+	 * not silently re-enable a filter the user disabled -> a latched
+	 * stream/record would resume on a "stop" call. */
+	if (create && !obs_source_enabled(filter))
 		obs_source_set_enabled(filter, true);
 	return filter;
 }
