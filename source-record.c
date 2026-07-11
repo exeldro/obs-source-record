@@ -2335,19 +2335,15 @@ static bool start_replay_buffer_source(obs_source_t *source, obs_data_t *request
 		return false;
 	obs_data_t *settings = obs_source_get_settings(filter);
 	const char *filename = obs_data_get_string(request_data, "filename");
-	struct source_record_filter_context *context = obs_obj_get_data(filter);
-	if (context && context->output_active) {
-		if (strlen(filename)) {
-			if (strstr(filename, "%") || strcmp(filename, obs_data_get_string(settings, "filename_formatting")) != 0) {
-				context->restart = true;
-			}
-		} else if (strstr(obs_data_get_string(settings, "filename_formatting"), "%")) {
-			context->restart = true;
-		}
-	}
 
+	/* The replay buffer uses replay_filename_formatting, not
+	 * filename_formatting. Writing the record key here did nothing for
+	 * replays and clobbered the record path; and the old restart-detection
+	 * needlessly force-stopped all outputs (flushing the buffer). The
+	 * replay format is applied hot (source_record_filter_update pushes it to
+	 * the live output and the muxer reads it at save time), so no restart. */
 	if (strlen(filename))
-		obs_data_set_string(settings, "filename_formatting", filename);
+		obs_data_set_string(settings, "replay_filename_formatting", filename);
 
 	obs_data_set_bool(settings, "replay_buffer", true);
 
