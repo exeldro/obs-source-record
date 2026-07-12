@@ -2019,7 +2019,11 @@ obs_source_t *get_source_record_filter(obs_source_t *source, obs_data_t *request
 			obs_source_filter_add(source, filter);
 		}
 	}
-	if (!obs_source_enabled(filter))
+	/* Only (re-)enable the filter for requests that actually start an
+	 * output. Stop/pause/split/chapter requests pass create=false and must
+	 * not silently re-enable a filter the user disabled -> a latched
+	 * stream/record would resume on a "stop" call. */
+	if (create && !obs_source_enabled(filter))
 		obs_source_set_enabled(filter, true);
 	return filter;
 }
@@ -2063,8 +2067,11 @@ static bool pause_record_source(obs_source_t *source, obs_data_t *request_data, 
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
 	obs_source_release(filter);
-	if (!context->fileOutput)
+	if (!context->fileOutput) {
+		if (response_data)
+			obs_data_set_string(response_data, "error", "record output is not active");
 		return false;
+	}
 	obs_output_pause(context->fileOutput, true);
 	return true;
 }
@@ -2077,8 +2084,11 @@ static bool unpause_record_source(obs_source_t *source, obs_data_t *request_data
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
 	obs_source_release(filter);
-	if (!context->fileOutput)
+	if (!context->fileOutput) {
+		if (response_data)
+			obs_data_set_string(response_data, "error", "record output is not active");
 		return false;
+	}
 	obs_output_pause(context->fileOutput, false);
 	return true;
 }
@@ -2091,13 +2101,18 @@ static bool split_record_source(obs_source_t *source, obs_data_t *request_data, 
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
 	obs_source_release(filter);
-	if (!context->fileOutput)
+	if (!context->fileOutput) {
+		if (response_data)
+			obs_data_set_string(response_data, "error", "record output is not active");
 		return false;
+	}
 	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
 	struct calldata cd;
 	calldata_init(&cd);
 	if (!proc_handler_call(ph, "split_file", &cd)) {
 		calldata_free(&cd);
+		if (response_data)
+			obs_data_set_string(response_data, "error", "split_file call failed");
 		return false;
 	}
 	calldata_free(&cd);
@@ -2112,14 +2127,19 @@ static bool add_chapter_record_source(obs_source_t *source, obs_data_t *request_
 
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
 	obs_source_release(filter);
-	if (!context->fileOutput)
+	if (!context->fileOutput) {
+		if (response_data)
+			obs_data_set_string(response_data, "error", "record output is not active");
 		return false;
+	}
 	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
 	struct calldata cd;
 	calldata_init(&cd);
 	calldata_set_string(&cd, "chapter_name", obs_data_get_string(request_data, "chapter_name"));
 	if (!proc_handler_call(ph, "add_chapter", &cd)) {
 		calldata_free(&cd);
+		if (response_data)
+			obs_data_set_string(response_data, "error", "add_chapter call failed");
 		return false;
 	}
 	calldata_free(&cd);
@@ -2335,19 +2355,15 @@ static bool start_replay_buffer_source(obs_source_t *source, obs_data_t *request
 		return false;
 	obs_data_t *settings = obs_source_get_settings(filter);
 	const char *filename = obs_data_get_string(request_data, "filename");
-	struct source_record_filter_context *context = obs_obj_get_data(filter);
-	if (context && context->output_active) {
-		if (strlen(filename)) {
-			if (strstr(filename, "%") || strcmp(filename, obs_data_get_string(settings, "filename_formatting")) != 0) {
-				context->restart = true;
-			}
-		} else if (strstr(obs_data_get_string(settings, "filename_formatting"), "%")) {
-			context->restart = true;
-		}
-	}
 
+	/* The replay buffer uses replay_filename_formatting, not
+	 * filename_formatting. Writing the record key here did nothing for
+	 * replays and clobbered the record path; and the old restart-detection
+	 * needlessly force-stopped all outputs (flushing the buffer). The
+	 * replay format is applied hot (source_record_filter_update pushes it to
+	 * the live output and the muxer reads it at save time), so no restart. */
 	if (strlen(filename))
-		obs_data_set_string(settings, "filename_formatting", filename);
+		obs_data_set_string(settings, "replay_filename_formatting", filename);
 
 	obs_data_set_bool(settings, "replay_buffer", true);
 
