@@ -424,7 +424,20 @@ static void *stop_output_thread_func(void *data)
 
 	if (so->output) {
 		if (obs_output_active(so->output)) {
-			obs_output_force_stop(so->output);
+			obs_output_stop(so->output);
+			uint64_t start_time = os_gettime_ns();
+			bool forced = false;
+			while (obs_output_active(so->output)) {
+				os_sleep_ms(10);
+				if (!forced && (os_gettime_ns() - start_time > 5000000000ULL)) {
+					obs_output_force_stop(so->output);
+					forced = true;
+				}
+				if (forced && (os_gettime_ns() - start_time > 10000000000ULL)) {
+					blog(LOG_WARNING, "Source Record: output timed out waiting to stop");
+					break;
+				}
+			}
 		}
 		obs_output_release(so->output);
 		so->output = NULL;
@@ -527,6 +540,14 @@ static void stop_output_sync(struct source_record_filter_context *context, obs_o
 		signal_handler_disconnect(sh, "stop", remove_filter, context);
 	if (obs_output_active(output)) {
 		obs_output_force_stop(output);
+		uint64_t start_time = os_gettime_ns();
+		while (obs_output_active(output)) {
+			os_sleep_ms(10);
+			if (os_gettime_ns() - start_time > 5000000000ULL) {
+				blog(LOG_WARNING, "Source Record: synchronous stop timed out");
+				break;
+			}
+		}
 	}
 }
 
