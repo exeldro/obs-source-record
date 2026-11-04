@@ -18,6 +18,8 @@
 #define OUTPUT_MODE_STREAMING_OR_RECORDING 4
 #define OUTPUT_MODE_VIRTUAL_CAMERA 5
 
+#define AUDIO_TRACK_CUSTOM -2
+
 #define BACKGROUND_CHANNEL 0
 #define SOURCE_CHANNEL 1
 
@@ -48,6 +50,7 @@ struct source_record_filter_context {
 	obs_hotkey_id splitHotkey;
 	obs_hotkey_id chapterHotkey;
 	int audio_track;
+	uint32_t audio_track_mask;
 	obs_weak_source_t *audio_source;
 	bool closing;
 	bool exiting;
@@ -747,6 +750,18 @@ static void set_encoder_defaults(obs_data_t *settings)
 	}
 }
 
+static uint32_t get_audio_track_mask(obs_data_t *settings)
+{
+	uint32_t mask = 0;
+	char name[16];
+	for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
+		snprintf(name, sizeof(name), "audio_track_%d", i + 1);
+		if (obs_data_get_bool(settings, name))
+			mask |= (1u << i);
+	}
+	return mask;
+}
+
 static void update_encoder(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	const char *enc_id = get_encoder_id(settings);
@@ -792,13 +807,17 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 		obs_encoder_update(filter->encoder, settings);
 	}
 	const int audio_track = obs_data_get_bool(settings, "different_audio") ? (int)obs_data_get_int(settings, "audio_track") : 0;
+	const uint32_t audio_track_mask = audio_track == AUDIO_TRACK_CUSTOM ? get_audio_track_mask(settings) : 0;
+	const bool uses_master_audio = audio_track > 0 || audio_track == -1 || audio_track == AUDIO_TRACK_CUSTOM;
+	const bool used_master_audio =
+		filter->audio_track > 0 || filter->audio_track == -1 || filter->audio_track == AUDIO_TRACK_CUSTOM;
 	if (filter->closing) {
-		if (filter->audio_track == 0 && filter->audio_output) {
+		if (!used_master_audio && filter->audio_output) {
 			audio_output_close(filter->audio_output);
 			filter->audio_output = NULL;
 		}
 	} else if (!filter->audio_output) {
-		if (audio_track > 0 || audio_track == -1) {
+		if (uses_master_audio) {
 			filter->audio_output = obs_get_audio();
 		} else {
 			struct audio_output_info oi = {0};
@@ -810,10 +829,10 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 			oi.input_callback = audio_input_callback;
 			audio_output_open(&filter->audio_output, &oi);
 		}
-	} else if (audio_track > 0 && filter->audio_track == 0) {
+	} else if (uses_master_audio && !used_master_audio) {
 		audio_output_close(filter->audio_output);
 		filter->audio_output = obs_get_audio();
-	} else if (audio_track == 0 && filter->audio_track > 0) {
+	} else if (!uses_master_audio && used_master_audio) {
 		filter->audio_output = NULL;
 		struct audio_output_info oi = {0};
 		oi.name = obs_source_get_name(filter->source);
@@ -825,7 +844,8 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 		audio_output_open(&filter->audio_output, &oi);
 	}
 
-	if (!filter->audioEncoder[0] || filter->audio_track != audio_track) {
+	if (!filter->audioEncoder[0] || filter->audio_track != audio_track ||
+	    (audio_track == AUDIO_TRACK_CUSTOM && filter->audio_track_mask != audio_track_mask)) {
 		for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
 			if (!filter->audioEncoder[i])
 				continue;
@@ -847,8 +867,20 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 			struct dstr name;
 			dstr_init(&name);
 			for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
-				dstr_printf(&name, "%s track %d", obs_source_get_name(filter->source), i + 1);
+				dstr_printf(&name, "%s %d", obs_module_text("Track"), i + 1);
 				filter->audioEncoder[i] = obs_audio_encoder_create(enc_id, name.array, audio_settings, i, NULL);
+			}
+			dstr_free(&name);
+		} else if (audio_track == AUDIO_TRACK_CUSTOM) {
+			struct dstr name;
+			dstr_init(&name);
+			int out_idx = 0;
+			for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
+				if ((audio_track_mask & (1u << i)) == 0)
+					continue;
+				dstr_printf(&name, "%s %d", obs_module_text("Track"), i + 1);
+				filter->audioEncoder[out_idx] = obs_audio_encoder_create(enc_id, name.array, audio_settings, i, NULL);
+				out_idx++;
 			}
 			dstr_free(&name);
 		} else {
@@ -869,6 +901,7 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 		}
 	}
 	filter->audio_track = audio_track;
+	filter->audio_track_mask = audio_track_mask;
 }
 
 static void source_record_filter_update(void *data, obs_data_t *settings)
@@ -1621,6 +1654,21 @@ static bool encoder_changed(void *data, obs_properties_t *props, obs_property_t 
 	return true;
 }
 
+static bool audio_track_changed(void *data, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(data);
+	UNUSED_PARAMETER(property);
+	const bool custom = obs_data_get_int(settings, "audio_track") == AUDIO_TRACK_CUSTOM;
+	char prop_name[16];
+	for (int i = 1; i <= MAX_AUDIO_MIXES; i++) {
+		snprintf(prop_name, sizeof(prop_name), "audio_track_%d", i);
+		obs_property_t *track_check = obs_properties_get(props, prop_name);
+		if (track_check)
+			obs_property_set_visible(track_check, custom);
+	}
+	return true;
+}
+
 static bool list_add_audio_sources(void *data, obs_source_t *source)
 {
 	obs_property_t *p = data;
@@ -1750,6 +1798,17 @@ static obs_properties_t *source_record_filter_properties(void *data)
 		char buffer[64];
 		snprintf(buffer, 64, "%s %i", track, i);
 		obs_property_list_add_int(p, buffer, i);
+	}
+	obs_property_list_add_int(p, obs_module_text("Custom"), AUDIO_TRACK_CUSTOM);
+	obs_property_set_modified_callback2(p, audio_track_changed, data);
+
+	for (int i = 1; i <= MAX_AUDIO_MIXES; i++) {
+		char prop_name[16];
+		snprintf(prop_name, sizeof(prop_name), "audio_track_%d", i);
+		char buffer[64];
+		snprintf(buffer, 64, "%s %i", track, i);
+		obs_property_t *track_check = obs_properties_add_bool(audio, prop_name, buffer);
+		obs_property_set_visible(track_check, false);
 	}
 
 	p = obs_properties_add_list(audio, "audio_source", obs_module_text("Source"), OBS_COMBO_TYPE_EDITABLE,
