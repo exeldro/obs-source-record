@@ -18,6 +18,7 @@
 #define OUTPUT_MODE_STREAMING_OR_RECORDING 4
 #define OUTPUT_MODE_VIRTUAL_CAMERA 5
 
+#define AUDIO_TRACK_ALL -1
 #define AUDIO_TRACK_CUSTOM -2
 
 #define BACKGROUND_CHANNEL 0
@@ -808,9 +809,9 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 	}
 	const int audio_track = obs_data_get_bool(settings, "different_audio") ? (int)obs_data_get_int(settings, "audio_track") : 0;
 	const uint32_t audio_track_mask = audio_track == AUDIO_TRACK_CUSTOM ? get_audio_track_mask(settings) : 0;
-	const bool uses_master_audio = audio_track > 0 || audio_track == -1 || audio_track == AUDIO_TRACK_CUSTOM;
+	const bool uses_master_audio = audio_track > 0 || audio_track == AUDIO_TRACK_ALL || audio_track == AUDIO_TRACK_CUSTOM;
 	const bool used_master_audio =
-		filter->audio_track > 0 || filter->audio_track == -1 || filter->audio_track == AUDIO_TRACK_CUSTOM;
+		filter->audio_track > 0 || filter->audio_track == AUDIO_TRACK_ALL || filter->audio_track == AUDIO_TRACK_CUSTOM;
 	if (filter->closing) {
 		if (!used_master_audio && filter->audio_output) {
 			audio_output_close(filter->audio_output);
@@ -863,11 +864,19 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 		if (audio_track > 0) {
 			filter->audioEncoder[0] = obs_audio_encoder_create(enc_id, obs_source_get_name(filter->source),
 									   audio_settings, audio_track - 1, NULL);
-		} else if (audio_track == -1) {
+		} else if (audio_track == AUDIO_TRACK_ALL) {
 			struct dstr name;
 			dstr_init(&name);
+			config_t *config = obs_frontend_get_profile_config();
 			for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
-				dstr_printf(&name, "%s %d", obs_module_text("Track"), i + 1);
+				char trackNameSetting[16];
+				snprintf(trackNameSetting, sizeof(trackNameSetting), "Track%dName", i);
+				const char *trackName = config_get_string(config, "AdvOut", trackNameSetting);
+				if (trackName && strlen(trackName) > 0) {
+					dstr_printf(&name, "%s", trackName);
+				} else {
+					dstr_printf(&name, "%s %d", obs_module_text("Track"), i + 1);
+				}
 				filter->audioEncoder[i] = obs_audio_encoder_create(enc_id, name.array, audio_settings, i, NULL);
 			}
 			dstr_free(&name);
@@ -1747,8 +1756,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	p = obs_properties_add_int(split_file, "max_size_mb",
 				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Size"), 0, 1073741824, 1);
 	obs_property_int_set_suffix(p, " MB");
-	obs_properties_add_button(split_file, "split_file_now", obs_frontend_get_locale_string("Basic.Main.SplitFile"),
-				 source_record_split_button);
+	obs_properties_add_button2(split_file, "split_file_now", obs_frontend_get_locale_string("Basic.Main.SplitFile"),
+				   source_record_split_button, data);
 	obs_properties_add_group(record, "split_file", obs_frontend_get_locale_string("Basic.Settings.Output.EnableSplitFile"),
 				 OBS_GROUP_CHECKABLE, split_file);
 
@@ -1792,12 +1801,20 @@ static obs_properties_t *source_record_filter_properties(void *data)
 
 	p = obs_properties_add_list(audio, "audio_track", obs_module_text("AudioTrack"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(p, obs_module_text("None"), 0);
-	obs_property_list_add_int(p, obs_module_text("All"), -1);
+	obs_property_list_add_int(p, obs_module_text("All"), AUDIO_TRACK_ALL);
+	config_t* config = obs_frontend_get_profile_config();
 	const char *track = obs_module_text("Track");
 	for (int i = 1; i <= MAX_AUDIO_MIXES; i++) {
-		char buffer[64];
-		snprintf(buffer, 64, "%s %i", track, i);
-		obs_property_list_add_int(p, buffer, i);
+		char trackNameSetting[16];
+		snprintf(trackNameSetting, sizeof(trackNameSetting), "Track%dName", i);
+		const char *trackName = config_get_string(config, "AdvOut", trackNameSetting);
+		if (trackName && strlen(trackName) > 0) {
+			obs_property_list_add_int(p, trackName, i);
+		} else {
+			char trackNameDefault[64];
+			snprintf(trackNameDefault, sizeof(trackNameDefault), "%s %i", track, i);
+			obs_property_list_add_int(p, trackNameDefault, i);
+		}
 	}
 	obs_property_list_add_int(p, obs_module_text("Custom"), AUDIO_TRACK_CUSTOM);
 	obs_property_set_modified_callback2(p, audio_track_changed, data);
