@@ -1223,13 +1223,21 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 			}
 			dstr_free(&name);
 		} else if (audio_track == AUDIO_TRACK_CUSTOM) {
+			config_t *config = obs_frontend_get_profile_config();
 			struct dstr name;
 			dstr_init(&name);
 			int out_idx = 0;
 			for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
 				if ((audio_track_mask & (1u << i)) == 0)
 					continue;
-				dstr_printf(&name, "%s %d", obs_module_text("Track"), i + 1);
+				char trackNameSetting[16];
+				snprintf(trackNameSetting, sizeof(trackNameSetting), "Track%dName", i);
+				const char *trackName = config_get_string(config, "AdvOut", trackNameSetting);
+				if (trackName && strlen(trackName) > 0) {
+					dstr_printf(&name, "%s", trackName);
+				} else {
+					dstr_printf(&name, "%s %d", obs_module_text("Track"), i + 1);
+				}
 				filter->audioEncoder[out_idx] = obs_audio_encoder_create(enc_id, name.array, audio_settings, i, NULL);
 				out_idx++;
 			}
