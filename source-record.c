@@ -63,7 +63,6 @@ struct source_record_filter_context {
 	bool closing;
 	bool exiting;
 	long long replay_buffer_duration;
-	struct vec4 backgroundColor;
 	bool remove_after_record;
 	long long record_max_seconds;
 	int last_frontend_event;
@@ -1349,21 +1348,28 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 
 	if (parent && filter->view && !filter->closing) {
 		obs_source_t *background_source = obs_view_get_source(filter->view, BACKGROUND_CHANNEL);
-		if (!background_source) {
-			background_source = obs_source_create_private("color_source", "Source Record Background", NULL);
-			obs_view_set_source(filter->view, BACKGROUND_CHANNEL, background_source);
+		if (obs_data_get_bool(settings, "custom_ffmpeg_output") && obs_data_get_bool(settings, "ff_alpha")) {
+			if (background_source) {
+				obs_view_set_source(filter->view, BACKGROUND_CHANNEL, NULL);
+				obs_source_release(background_source);
+			}
+		} else {
+			if (!background_source) {
+				background_source = obs_source_create_private("color_source", "Source Record Background", NULL);
+				obs_view_set_source(filter->view, BACKGROUND_CHANNEL, background_source);
+			}
+			obs_data_t *css = obs_source_get_settings(background_source);
+			if (obs_data_get_int(css, "color") != obs_data_get_int(settings, "backgroundColor") ||
+			    obs_data_get_int(css, "width") != obs_source_get_width(parent) ||
+			    obs_data_get_int(css, "height") != obs_source_get_height(parent)) {
+				obs_data_set_int(css, "color", obs_data_get_int(settings, "backgroundColor"));
+				obs_data_set_int(css, "width", obs_source_get_width(parent));
+				obs_data_set_int(css, "height", obs_source_get_height(parent));
+				obs_source_update(background_source, css);
+			}
+			obs_data_release(css);
+			obs_source_release(background_source);
 		}
-		obs_data_t *css = obs_source_get_settings(background_source);
-		if (obs_data_get_int(css, "color") != obs_data_get_int(settings, "backgroundColor") ||
-		    obs_data_get_int(css, "width") != obs_source_get_width(parent) ||
-		    obs_data_get_int(css, "height") != obs_source_get_height(parent)) {
-			obs_data_set_int(css, "color", obs_data_get_int(settings, "backgroundColor"));
-			obs_data_set_int(css, "width", obs_source_get_width(parent));
-			obs_data_set_int(css, "height", obs_source_get_height(parent));
-			obs_source_update(background_source, css);
-		}
-		obs_data_release(css);
-		obs_source_release(background_source);
 	}
 
 	if (record != filter->record) {
@@ -1465,8 +1471,6 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			filter->audioEncoder[i] = NULL;
 		}
 	}
-
-	vec4_from_rgba(&filter->backgroundColor, (uint32_t)obs_data_get_int(settings, "backgroundColor"));
 
 	if (obs_data_get_bool(settings, "different_audio")) {
 		const char *source_name = obs_data_get_string(settings, "audio_source");
