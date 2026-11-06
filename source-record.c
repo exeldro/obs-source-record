@@ -2835,16 +2835,16 @@ static bool start_replay_buffer_source(obs_source_t *source, obs_data_t *request
 	struct source_record_filter_context *context = obs_obj_get_data(filter);
 	if (context && context->output_active) {
 		if (strlen(filename)) {
-			if (strstr(filename, "%") || strcmp(filename, obs_data_get_string(settings, "filename_formatting")) != 0) {
+			if (strstr(filename, "%") || strcmp(filename, obs_data_get_string(settings, "replay_filename_formatting")) != 0) {
 				context->restart = true;
 			}
-		} else if (strstr(obs_data_get_string(settings, "filename_formatting"), "%")) {
+		} else if (strstr(obs_data_get_string(settings, "replay_filename_formatting"), "%")) {
 			context->restart = true;
 		}
 	}
 
 	if (strlen(filename))
-		obs_data_set_string(settings, "filename_formatting", filename);
+		obs_data_set_string(settings, "replay_filename_formatting", filename);
 
 	obs_data_set_bool(settings, "replay_buffer", true);
 
