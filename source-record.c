@@ -57,6 +57,7 @@ struct source_record_filter_context {
 	obs_hotkey_pair_id pauseHotkeys;
 	obs_hotkey_id splitHotkey;
 	obs_hotkey_id chapterHotkey;
+	obs_hotkey_id replayHotkey;
 	int audio_track;
 	uint32_t audio_track_mask;
 	obs_weak_source_t *audio_source;
@@ -1613,6 +1614,7 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 	context->pauseHotkeys = OBS_INVALID_HOTKEY_PAIR_ID;
 	context->splitHotkey = OBS_INVALID_HOTKEY_ID;
 	context->chapterHotkey = OBS_INVALID_HOTKEY_ID;
+	context->replayHotkey = OBS_INVALID_HOTKEY_ID;
 	source_record_filter_update(context, settings);
 	obs_frontend_add_event_callback(frontend_event, context);
 	return context;
@@ -1650,6 +1652,9 @@ static void source_record_filter_destroy(void *data)
 
 	if (context->chapterHotkey != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(context->chapterHotkey);
+
+	if (context->replayHotkey != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(context->replayHotkey);
 
 	obs_output_release(context->fileOutput);
 	obs_output_release(context->streamOutput);
@@ -1779,6 +1784,22 @@ static void source_record_chapter_hotkey(void *data, obs_hotkey_id id, obs_hotke
 	calldata_free(&cd);
 }
 
+static void source_record_replay_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	if (!pressed)
+		return;
+	struct source_record_filter_context *context = data;
+	if (!context->replayOutput)
+		return;
+	proc_handler_t *ph = obs_output_get_proc_handler(context->replayOutput);
+	struct calldata cd;
+	calldata_init(&cd);
+	proc_handler_call(ph, "save", &cd);
+	calldata_free(&cd);
+}
+
 static void source_record_filter_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
@@ -1816,6 +1837,12 @@ static void source_record_filter_tick(void *data, float seconds)
 		context->chapterHotkey = obs_hotkey_register_source(parent, "source_record.AddChapterMarker",
 								    obs_frontend_get_locale_string("Basic.Main.AddChapterMarker"),
 								    source_record_chapter_hotkey, context);
+
+	if (context->replayHotkey == OBS_INVALID_HOTKEY_ID)
+		context->replayHotkey = obs_hotkey_register_source(parent, "source_record.ReplayBuffer",
+								   obs_frontend_get_locale_string("Basic.Main.SaveReplay"),
+								   source_record_replay_hotkey, context);
+
 
 	uint32_t width = obs_source_get_width(parent);
 	width += (width & 1);
