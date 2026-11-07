@@ -396,6 +396,163 @@ static void source_record_replay_saved(void *data, calldata_t *cd)
 	bfree(path_fallback);
 }
 
+static const char *output_type_name(enum output_type type)
+{
+	switch (type) {
+	case OUTPUT_TYPE_FILE:
+		return "record";
+	case OUTPUT_TYPE_STREAM:
+		return "stream";
+	case OUTPUT_TYPE_REPLAY:
+		return "replay_buffer";
+	}
+	return "";
+}
+
+/* Websocket vendor events (#178): "<type>_started", "<type>_stopped" and
+ * "record_file_changed", with the filter, its source and the file path. */
+static void emit_output_event(struct source_record_filter_context *context, enum output_type type, const char *what,
+			      const char *path, calldata_t *cd)
+{
+	if (!vendor || !context || !context->source)
+		return;
+	struct dstr name;
+	dstr_init_copy(&name, output_type_name(type));
+	dstr_cat(&name, "_");
+	dstr_cat(&name, what);
+
+	obs_data_t *event_data = obs_data_create();
+	obs_data_set_string(event_data, "filter", obs_source_get_name(context->source));
+	obs_source_t *parent = obs_filter_get_parent(context->source);
+	if (parent)
+		obs_data_set_string(event_data, "source", obs_source_get_name(parent));
+	if (path)
+		obs_data_set_string(event_data, "path", path);
+	if (cd && strcmp(what, "stopped") == 0) {
+		long long code = 0;
+		if (calldata_get_int(cd, "code", &code))
+			obs_data_set_int(event_data, "code", code);
+	}
+	obs_websocket_vendor_emit_event(vendor, name.array, event_data);
+	obs_data_release(event_data);
+	dstr_free(&name);
+}
+
+static const char *output_path(obs_output_t *output)
+{
+	obs_data_t *settings = obs_output_get_settings(output);
+	const char *path = obs_data_get_string(settings, "path");
+	if (!path || !*path)
+		path = obs_data_get_string(settings, "url");
+	obs_data_release(settings);
+	return path;
+}
+
+static void file_output_started(void *data, calldata_t *cd)
+{
+	obs_output_t *output = calldata_ptr(cd, "output");
+	struct dstr path;
+	dstr_init_copy(&path, output ? output_path(output) : "");
+	emit_output_event(data, OUTPUT_TYPE_FILE, "started", path.array, cd);
+	dstr_free(&path);
+}
+
+static void file_output_stopped(void *data, calldata_t *cd)
+{
+	struct source_record_filter_context *context = data;
+	obs_output_t *output = calldata_ptr(cd, "output");
+	struct dstr path;
+	dstr_init(&path);
+	if (output) {
+		proc_handler_t *ph = obs_output_get_proc_handler(output);
+		calldata_t proc_cd;
+		calldata_init(&proc_cd);
+		/* after a split the output knows the name of the last file */
+		if (ph && proc_handler_call(ph, "get_last_file", &proc_cd)) {
+			const char *last = calldata_string(&proc_cd, "path");
+			if (last && *last)
+				dstr_copy(&path, last);
+		}
+		calldata_free(&proc_cd);
+		if (dstr_is_empty(&path))
+			dstr_copy(&path, output_path(output));
+	}
+	emit_output_event(context, OUTPUT_TYPE_FILE, "stopped", path.array, cd);
+	dstr_free(&path);
+}
+
+static void file_output_file_changed(void *data, calldata_t *cd)
+{
+	struct source_record_filter_context *context = data;
+	if (!vendor || !context || !context->source)
+		return;
+	obs_data_t *event_data = obs_data_create();
+	obs_data_set_string(event_data, "filter", obs_source_get_name(context->source));
+	obs_source_t *parent = obs_filter_get_parent(context->source);
+	if (parent)
+		obs_data_set_string(event_data, "source", obs_source_get_name(parent));
+	const char *next = calldata_string(cd, "next_file");
+	obs_data_set_string(event_data, "path", next ? next : "");
+	obs_websocket_vendor_emit_event(vendor, "record_file_changed", event_data);
+	obs_data_release(event_data);
+}
+
+static void stream_output_started(void *data, calldata_t *cd)
+{
+	emit_output_event(data, OUTPUT_TYPE_STREAM, "started", NULL, cd);
+}
+
+static void stream_output_stopped(void *data, calldata_t *cd)
+{
+	emit_output_event(data, OUTPUT_TYPE_STREAM, "stopped", NULL, cd);
+}
+
+static void replay_output_started(void *data, calldata_t *cd)
+{
+	emit_output_event(data, OUTPUT_TYPE_REPLAY, "started", NULL, cd);
+}
+
+static void replay_output_stopped(void *data, calldata_t *cd)
+{
+	emit_output_event(data, OUTPUT_TYPE_REPLAY, "stopped", NULL, cd);
+}
+
+static void connect_output_signals(struct source_record_filter_context *context, obs_output_t *output, enum output_type type)
+{
+	signal_handler_t *sh = output ? obs_output_get_signal_handler(output) : NULL;
+	if (!sh)
+		return;
+	if (type == OUTPUT_TYPE_FILE) {
+		signal_handler_connect(sh, "start", file_output_started, context);
+		signal_handler_connect(sh, "stop", file_output_stopped, context);
+		signal_handler_connect(sh, "file_changed", file_output_file_changed, context);
+	} else if (type == OUTPUT_TYPE_STREAM) {
+		signal_handler_connect(sh, "start", stream_output_started, context);
+		signal_handler_connect(sh, "stop", stream_output_stopped, context);
+	} else if (type == OUTPUT_TYPE_REPLAY) {
+		signal_handler_connect(sh, "start", replay_output_started, context);
+		signal_handler_connect(sh, "stop", replay_output_stopped, context);
+	}
+}
+
+static void remove_filter(void *data, calldata_t *calldata);
+
+static void disconnect_output_signals(struct source_record_filter_context *context, obs_output_t *output)
+{
+	signal_handler_t *sh = output ? obs_output_get_signal_handler(output) : NULL;
+	if (!sh)
+		return;
+	signal_handler_disconnect(sh, "start", file_output_started, context);
+	signal_handler_disconnect(sh, "stop", file_output_stopped, context);
+	signal_handler_disconnect(sh, "file_changed", file_output_file_changed, context);
+	signal_handler_disconnect(sh, "start", stream_output_started, context);
+	signal_handler_disconnect(sh, "stop", stream_output_stopped, context);
+	signal_handler_disconnect(sh, "start", replay_output_started, context);
+	signal_handler_disconnect(sh, "stop", replay_output_stopped, context);
+	signal_handler_disconnect(sh, "saved", source_record_replay_saved, context);
+	signal_handler_disconnect(sh, "stop", remove_filter, context);
+}
+
 static void stop_output_complete_task(void *data)
 {
 	struct stop_output *so = data;
@@ -456,6 +613,11 @@ static void *stop_output_thread_func(void *data)
 				}
 			}
 		}
+		/* An output that did not stop in time may still signal later, when
+		 * the filter may be gone. One that stopped signals right after it
+		 * became inactive, so keep listening for that. */
+		if (obs_output_active(so->output))
+			disconnect_output_signals(so->context, so->output);
 		obs_output_release(so->output);
 		so->output = NULL;
 	}
@@ -943,6 +1105,7 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	}
 	if (!filter->fileOutput) {
 		filter->fileOutput = obs_output_create(output_id, obs_source_get_name(filter->source), s, NULL);
+		connect_output_signals(filter, filter->fileOutput, OUTPUT_TYPE_FILE);
 		if (filter->fileOutput && filter->remove_after_record) {
 			signal_handler_t *sh = obs_output_get_signal_handler(filter->fileOutput);
 			signal_handler_connect(sh, "stop", remove_filter, filter);
@@ -1037,6 +1200,7 @@ static void start_stream_output(struct source_record_filter_context *filter, obs
 
 	if (!filter->streamOutput) {
 		filter->streamOutput = obs_output_create(type, obs_source_get_name(filter->source), settings, NULL);
+		connect_output_signals(filter, filter->streamOutput, OUTPUT_TYPE_STREAM);
 	} else {
 		obs_output_update(filter->streamOutput, settings);
 	}
@@ -1089,6 +1253,7 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 		signal_handler_t *sh = obs_output_get_signal_handler(filter->replayOutput);
 		if (sh)
 			signal_handler_connect(sh, "saved", source_record_replay_saved, filter);
+		connect_output_signals(filter, filter->replayOutput, OUTPUT_TYPE_REPLAY);
 		if (filter->remove_after_record) {
 			sh = obs_output_get_signal_handler(filter->replayOutput);
 			signal_handler_connect(sh, "stop", remove_filter, filter);
@@ -1772,6 +1937,9 @@ static void source_record_filter_destroy(void *data)
 	if (context->replayHotkey != OBS_INVALID_HOTKEY_ID)
 		obs_hotkey_unregister(context->replayHotkey);
 
+	disconnect_output_signals(context, context->fileOutput);
+	disconnect_output_signals(context, context->streamOutput);
+	disconnect_output_signals(context, context->replayOutput);
 	obs_output_release(context->fileOutput);
 	obs_output_release(context->streamOutput);
 	obs_output_release(context->replayOutput);
