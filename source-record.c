@@ -1839,7 +1839,7 @@ static void source_record_filter_tick(void *data, float seconds)
 								    source_record_chapter_hotkey, context);
 
 	if (context->replayHotkey == OBS_INVALID_HOTKEY_ID)
-		context->replayHotkey = obs_hotkey_register_source(parent, "source_record.ReplayBuffer",
+		context->replayHotkey = obs_hotkey_register_source(parent, "source_record.SaveReplay",
 								   obs_frontend_get_locale_string("Basic.Main.SaveReplay"),
 								   source_record_replay_hotkey, context);
 

@@ -28,7 +28,7 @@ DefaultDirName={code:GetDirName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir="package"
-OutputBaseFilename=@PROJECT_NAME@-installer
+OutputBaseFilename=@PROJECT_NAME@-@PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@-windows-installer
 DirExistsWarning=no
 ; Wizard Information
 WizardStyle=modern
@@ -40,6 +40,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "package/*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "package/obs-plugins/64bit/*"; DestDir: "{commonappdata}\obs-studio\plugins\@PROJECT_NAME@"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "package/data/obs-plugins/@PROJECT_NAME@/*"; DestDir: "{commonappdata}\obs-studio\plugins\@PROJECT_NAME@\data"; Flags: ignoreversion recursesubdirs createallsubdirs
+
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]

@@ -298,6 +298,20 @@ jobs:
         with:
           name: '${{ env.FILE_NAME }}-installer'
           path: package/*.exe
+      - name: 'Convert to new format'
+        if: success()
+        run: |
+          mkdir ./package/nf
+          robocopy .\package\obs-plugins\64bit\ .\package\nf\ /E
+          mkdir ./package/nf/data
+          robocopy .\package\data\obs-plugins\${{ env.PLUGIN_NAME }}\ .\package\nf\data\ /E
+          exit 0
+      - name: Publish new format zip
+        if: success()
+        uses: actions/upload-artifact@v4.3.1
+        with:
+          name: '${{ env.FILE_NAME }}-OBS33'
+          path: package/nf/*
       - name: Remove temp artifacts
         uses: geekyeggo/delete-artifact@v4.1.0
         with:
