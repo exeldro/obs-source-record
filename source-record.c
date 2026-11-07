@@ -10,7 +10,9 @@
 #include <errno.h>
 #include <stdio.h>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
 #endif
 
@@ -1107,6 +1109,34 @@ static void strip_ffmpeg_option(struct dstr *str, const char *opt_name)
 /* Two filters with the same folder and filename format generate the same path
  * and would write over each other (#181, #105). Claim the name with an
  * exclusive create and add the same " (2)" suffix OBS uses when it is taken. */
+/* Creates an empty file, failing when it already exists. Done without
+ * os_fopen, whose FILE belongs to the C runtime of libobs. */
+static bool create_new_file(const char *path, bool *exists)
+{
+#ifdef _WIN32
+	wchar_t *wpath = NULL;
+	if (!os_utf8_to_wcs_ptr(path, 0, &wpath) || !wpath)
+		return false;
+	HANDLE h = CreateFileW(wpath, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+	bfree(wpath);
+	if (h == INVALID_HANDLE_VALUE) {
+		const DWORD err = GetLastError();
+		*exists = err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS;
+		return false;
+	}
+	CloseHandle(h);
+	return true;
+#else
+	FILE *f = fopen(path, "wbx");
+	if (!f) {
+		*exists = errno == EEXIST;
+		return false;
+	}
+	fclose(f);
+	return true;
+#endif
+}
+
 static void claim_unique_path(struct dstr *path)
 {
 	const char *slash = strrchr(path->array, '/');
@@ -1124,13 +1154,12 @@ static void claim_unique_path(struct dstr *path)
 	dstr_init_copy_dstr(&candidate, path);
 
 	for (int n = 2; n < 1000; n++) {
-		FILE *f = os_fopen(candidate.array, "wbx");
-		if (f) {
-			fclose(f);
+		bool exists = false;
+		if (create_new_file(candidate.array, &exists)) {
 			dstr_copy_dstr(path, &candidate);
 			break;
 		}
-		if (errno != EEXIST)
+		if (!exists)
 			break;
 		dstr_resize(&candidate, ext_start);
 		dstr_catf(&candidate, " (%d)", n);
