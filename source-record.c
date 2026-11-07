@@ -75,6 +75,16 @@ struct source_record_filter_context {
 	struct dstr rec_path;
 	struct dstr rec_format;
 	struct dstr rec_filename;
+	/* Audio taken from the source as it is produced (after its filters),
+	 * independent of the OBS mixer tracks. */
+	uint64_t last_retry_ns;
+	pthread_mutex_t capture_mutex;
+	obs_weak_source_t *captured_audio;
+	float *capture_buf[2];
+	size_t capture_capacity;
+	size_t capture_start;
+	size_t capture_frames;
+	bool capture_primed;
 };
 
 DARRAY(obs_source_t *) source_record_filters;
@@ -155,12 +165,163 @@ static void mix_audio(obs_source_t *parent, obs_source_t *child, void *param)
 	}
 }
 
+#define CAPTURE_CHANNELS 2
+
+static void capture_push(struct source_record_filter_context *filter, float *const *data, size_t channels, size_t frames,
+			 float volume)
+{
+	if (!filter->capture_capacity)
+		return;
+	if (frames > filter->capture_capacity)
+		frames = filter->capture_capacity;
+	/* drop the oldest frames rather than growing the delay */
+	if (filter->capture_frames + frames > filter->capture_capacity) {
+		const size_t drop = filter->capture_frames + frames - filter->capture_capacity;
+		filter->capture_start = (filter->capture_start + drop) % filter->capture_capacity;
+		filter->capture_frames -= drop;
+	}
+	size_t pos = (filter->capture_start + filter->capture_frames) % filter->capture_capacity;
+	for (size_t i = 0; i < frames; i++) {
+		for (size_t ch = 0; ch < CAPTURE_CHANNELS; ch++) {
+			/* mono sources go to both channels */
+			const float *in = data ? data[ch < channels ? ch : 0] : NULL;
+			filter->capture_buf[ch][pos] = in ? in[i] * volume : 0.0f;
+		}
+		if (++pos == filter->capture_capacity)
+			pos = 0;
+	}
+	filter->capture_frames += frames;
+}
+
+static void source_audio_captured(void *param, obs_source_t *source, const struct audio_data *audio, bool muted)
+{
+	struct source_record_filter_context *filter = param;
+	if (!audio || !audio->frames)
+		return;
+	const size_t channels = audio_output_get_channels(obs_get_audio());
+	float volume = muted ? 0.0f : obs_source_get_volume(source);
+	pthread_mutex_lock(&filter->capture_mutex);
+	capture_push(filter, (float *const *)audio->data, channels ? channels : 1, audio->frames, volume);
+	pthread_mutex_unlock(&filter->capture_mutex);
+}
+
+/* Fills one block from the captured audio. Returns false while nothing has
+ * been captured yet. */
+static bool capture_pop(struct source_record_filter_context *filter, struct audio_output_data *mixes, uint32_t mixers,
+			size_t channels)
+{
+	pthread_mutex_lock(&filter->capture_mutex);
+	if (!filter->capture_primed) {
+		/* keep a little audio in hand so short gaps in delivery do not
+		 * cause dropouts */
+		if (filter->capture_frames < AUDIO_OUTPUT_FRAMES * 2) {
+			pthread_mutex_unlock(&filter->capture_mutex);
+			return false;
+		}
+		filter->capture_primed = true;
+	}
+	const size_t avail = filter->capture_frames < AUDIO_OUTPUT_FRAMES ? filter->capture_frames : AUDIO_OUTPUT_FRAMES;
+	for (size_t mix_idx = 0; mix_idx < MAX_AUDIO_MIXES; mix_idx++) {
+		if ((mixers & (1 << mix_idx)) == 0)
+			continue;
+		for (size_t ch = 0; ch < channels && ch < CAPTURE_CHANNELS; ch++) {
+			float *out = mixes[mix_idx].data[ch];
+			if (!out)
+				continue;
+			size_t pos = filter->capture_start;
+			for (size_t i = 0; i < avail; i++) {
+				out[i] += filter->capture_buf[ch][pos];
+				if (++pos == filter->capture_capacity)
+					pos = 0;
+			}
+		}
+	}
+	filter->capture_start = (filter->capture_start + avail) % filter->capture_capacity;
+	filter->capture_frames -= avail;
+	/* the source may deliver slightly faster than the output clock, do not
+	 * let the delay grow */
+	if (filter->capture_frames > AUDIO_OUTPUT_FRAMES * 4) {
+		const size_t drop = filter->capture_frames - AUDIO_OUTPUT_FRAMES * 2;
+		filter->capture_start = (filter->capture_start + drop) % filter->capture_capacity;
+		filter->capture_frames -= drop;
+	}
+	if (avail < AUDIO_OUTPUT_FRAMES)
+		filter->capture_primed = false;
+	pthread_mutex_unlock(&filter->capture_mutex);
+	return true;
+}
+
+static void stop_audio_capture(struct source_record_filter_context *filter)
+{
+	if (!filter->captured_audio)
+		return;
+	obs_source_t *source = obs_weak_source_get_source(filter->captured_audio);
+	if (source) {
+		obs_source_remove_audio_capture_callback(source, source_audio_captured, filter);
+		obs_source_release(source);
+	}
+	obs_weak_source_release(filter->captured_audio);
+	filter->captured_audio = NULL;
+	pthread_mutex_lock(&filter->capture_mutex);
+	filter->capture_frames = 0;
+	filter->capture_start = 0;
+	filter->capture_primed = false;
+	pthread_mutex_unlock(&filter->capture_mutex);
+}
+
+/* Captures the audio of the source the recording takes its audio from when
+ * that is a single source; scenes are mixed from their children instead. */
+static void update_audio_capture(struct source_record_filter_context *filter)
+{
+	obs_source_t *wanted = NULL;
+	const bool own_audio = filter->audio_output && filter->audio_track == 0 && !filter->closing;
+	if (own_audio) {
+		if (filter->audio_source)
+			wanted = obs_weak_source_get_source(filter->audio_source);
+		else
+			wanted = obs_source_get_ref(obs_filter_get_parent(filter->source));
+		if (wanted && ((obs_source_get_output_flags(wanted) & (OBS_SOURCE_AUDIO | OBS_SOURCE_COMPOSITE)) !=
+				       OBS_SOURCE_AUDIO ||
+			       obs_source_removed(wanted))) {
+			obs_source_release(wanted);
+			wanted = NULL;
+		}
+	}
+	if (filter->captured_audio && wanted && obs_weak_source_references_source(filter->captured_audio, wanted)) {
+		obs_source_release(wanted);
+		return;
+	}
+	stop_audio_capture(filter);
+	if (!wanted)
+		return;
+	pthread_mutex_lock(&filter->capture_mutex);
+	if (!filter->capture_capacity) {
+		/* one second */
+		filter->capture_capacity = audio_output_get_sample_rate(obs_get_audio());
+		if (!filter->capture_capacity)
+			filter->capture_capacity = 48000;
+		for (size_t ch = 0; ch < CAPTURE_CHANNELS; ch++)
+			filter->capture_buf[ch] = bzalloc(sizeof(float) * filter->capture_capacity);
+	}
+	pthread_mutex_unlock(&filter->capture_mutex);
+	filter->captured_audio = obs_source_get_weak_source(wanted);
+	obs_source_add_audio_capture_callback(wanted, source_audio_captured, filter);
+	obs_source_release(wanted);
+}
+
 static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint64_t *out_ts, uint32_t mixers,
 				 struct audio_output_data *mixes)
 {
 	UNUSED_PARAMETER(end_ts_in);
 	struct source_record_filter_context *filter = param;
 	if (!mixers || filter->closing || obs_source_removed(filter->source)) {
+		if (filter->capture_frames) {
+			/* nothing encodes it: do not let captured audio pile up */
+			pthread_mutex_lock(&filter->capture_mutex);
+			filter->capture_frames = 0;
+			filter->capture_primed = false;
+			pthread_mutex_unlock(&filter->capture_mutex);
+		}
 		*out_ts = start_ts_in;
 		return true;
 	}
@@ -224,6 +385,16 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 		*out_ts = start_ts_in;
 		if (release_audio)
 			obs_source_release(audio_source);
+		return true;
+	}
+
+	if (filter->captured_audio && obs_weak_source_references_source(filter->captured_audio, audio_source)) {
+		/* The track mixes of a source are only rendered while an OBS output
+		 * uses that track, so read what the source produced instead. */
+		if (release_audio)
+			obs_source_release(audio_source);
+		*out_ts = start_ts_in;
+		capture_pop(filter, mixes, mixers, audio_output_get_channels(filter->audio_output));
 		return true;
 	}
 
@@ -968,9 +1139,26 @@ static void claim_unique_path(struct dstr *path)
 	dstr_free(&candidate);
 }
 
+/* The folder recordings and replays go to. A typed path (#171) wins over the
+ * one picked with Browse; a relative one is relative to the OBS working
+ * directory, which for a portable install is its bin folder. */
+static void get_record_directory(obs_data_t *settings, struct dstr *out)
+{
+	const char *manual = obs_data_get_string(settings, "path_manual");
+	if (manual && *manual) {
+		char *abs = os_get_abs_path_ptr(manual);
+		dstr_copy(out, abs ? abs : manual);
+		bfree(abs);
+	} else {
+		dstr_copy(out, obs_data_get_string(settings, "path"));
+	}
+	while (out->len > 1 && (out->array[out->len - 1] == '/' || out->array[out->len - 1] == '\\'))
+		dstr_resize(out, out->len - 1);
+}
+
 static void remember_record_settings(struct source_record_filter_context *filter, obs_data_t *settings)
 {
-	dstr_copy(&filter->rec_path, obs_data_get_string(settings, "path"));
+	get_record_directory(settings, &filter->rec_path);
 	dstr_copy(&filter->rec_format, obs_data_get_string(settings, "rec_format"));
 	dstr_copy(&filter->rec_filename, obs_data_get_string(settings, "filename_formatting"));
 }
@@ -979,9 +1167,14 @@ static void remember_record_settings(struct source_record_filter_context *filter
  * running file output was started with. */
 static bool record_settings_changed(struct source_record_filter_context *filter, obs_data_t *settings)
 {
-	return dstr_cmp(&filter->rec_path, obs_data_get_string(settings, "path")) != 0 ||
-	       dstr_cmp(&filter->rec_format, obs_data_get_string(settings, "rec_format")) != 0 ||
-	       dstr_cmp(&filter->rec_filename, obs_data_get_string(settings, "filename_formatting")) != 0;
+	struct dstr dir;
+	dstr_init(&dir);
+	get_record_directory(settings, &dir);
+	const bool changed = dstr_cmp(&filter->rec_path, dir.array ? dir.array : "") != 0 ||
+			     dstr_cmp(&filter->rec_format, obs_data_get_string(settings, "rec_format")) != 0 ||
+			     dstr_cmp(&filter->rec_filename, obs_data_get_string(settings, "filename_formatting")) != 0;
+	dstr_free(&dir);
+	return changed;
 }
 
 static void start_file_output(struct source_record_filter_context *filter, obs_data_t *settings)
@@ -991,8 +1184,8 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 
 	obs_data_t *s = obs_data_create();
 	const char *format = obs_data_get_string(settings, "rec_format");
-	const char *directory = obs_data_get_string(settings, "path");
 	remember_record_settings(filter, settings);
+	const char *directory = filter->rec_path.array ? filter->rec_path.array : "";
 	char *filename =
 		os_generate_formatted_filename(GetFormatExt(format), true, obs_data_get_string(settings, "filename_formatting"));
 	struct dstr path;
@@ -1230,7 +1423,13 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 
 	obs_data_t *s = obs_data_create();
 
-	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
+	struct dstr directory;
+	dstr_init(&directory);
+	get_record_directory(settings, &directory);
+	if (directory.len)
+		os_mkdirs(directory.array);
+	obs_data_set_string(s, "directory", directory.array ? directory.array : "");
+	dstr_free(&directory);
 	obs_data_set_string(s, "format", obs_data_get_string(settings, "replay_filename_formatting"));
 	obs_data_set_string(s, "extension", GetFormatExt(obs_data_get_string(settings, "rec_format")));
 	obs_data_set_bool(s, "allow_spaces", true);
@@ -1695,7 +1894,11 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			obs_data_release(hotkeys);
 			stop_output_async(filter, &filter->replayOutput, OUTPUT_TYPE_REPLAY);
 		} else {
-			obs_data_set_string(replay_settings, "directory", obs_data_get_string(settings, "path"));
+			struct dstr directory;
+			dstr_init(&directory);
+			get_record_directory(settings, &directory);
+			obs_data_set_string(replay_settings, "directory", directory.array ? directory.array : "");
+			dstr_free(&directory);
 			obs_data_set_string(replay_settings, "format",
 					    obs_data_get_string(settings, "replay_filename_formatting"));
 			obs_data_set_string(replay_settings, "extension",
@@ -1888,6 +2091,7 @@ static void *source_record_filter_create(obs_data_t *settings, obs_source_t *sou
 {
 	struct source_record_filter_context *context = bzalloc(sizeof(struct source_record_filter_context));
 	context->source = source;
+	pthread_mutex_init(&context->capture_mutex, NULL);
 
 	da_push_back(source_record_filters, &source);
 	context->last_frontend_event = -1;
@@ -1954,12 +2158,18 @@ static void source_record_filter_destroy(void *data)
 	obs_encoder_release(context->encoder);
 	context->encoder = NULL;
 
+	stop_audio_capture(context);
+
 	obs_weak_source_release(context->audio_source);
 	context->audio_source = NULL;
 
 	if (context->audio_track == 0 && context->audio_output)
 		audio_output_close(context->audio_output);
 	context->audio_output = NULL;
+
+	for (size_t ch = 0; ch < CAPTURE_CHANNELS; ch++)
+		bfree(context->capture_buf[ch]);
+	pthread_mutex_destroy(&context->capture_mutex);
 
 	obs_service_release(context->service);
 	context->service = NULL;
@@ -2132,8 +2342,10 @@ static void source_record_filter_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
 	struct source_record_filter_context *context = data;
-	if (context->closing)
+	if (context->closing) {
+		stop_audio_capture(context);
 		return;
+	}
 
 	obs_source_t *parent = obs_filter_get_parent(context->source);
 	if (!parent)
@@ -2143,6 +2355,8 @@ static void source_record_filter_tick(void *data, float seconds)
 		context->closing = true;
 		return;
 	}
+
+	update_audio_capture(context);
 
 	if (context->enableHotkey == OBS_INVALID_HOTKEY_PAIR_ID)
 		context->enableHotkey = obs_hotkey_pair_register_source(
@@ -2249,6 +2463,37 @@ static void source_record_filter_tick(void *data, float seconds)
 		context->restart = false;
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
 	} else if (wanted) {
+		/* An output that stopped on its own (disk full, capture lost, start
+		 * failed, connection dropped) is never started again by itself:
+		 * drop it so it is created anew below, at most every few seconds
+		 * (#84, #91, #92). */
+		const uint64_t now = os_gettime_ns();
+		if (now - context->last_retry_ns > 5000000000ULL) {
+			bool dropped = false;
+			if (context->fileOutput && !context->starting_file_output && !context->stopping_file_output &&
+			    !obs_output_active(context->fileOutput)) {
+				blog(LOG_INFO, "[Source Record] recording of '%s' stopped, starting it again",
+				     obs_source_get_name(context->source));
+				signal_handler_t *sh = obs_output_get_signal_handler(context->fileOutput);
+				if (sh)
+					signal_handler_disconnect(sh, "stop", remove_filter, context);
+				stop_output_async(context, &context->fileOutput, OUTPUT_TYPE_FILE);
+				dropped = true;
+			}
+			if (context->streamOutput && !context->starting_stream_output && !context->stopping_stream_output &&
+			    !obs_output_active(context->streamOutput)) {
+				stop_output_async(context, &context->streamOutput, OUTPUT_TYPE_STREAM);
+				dropped = true;
+			}
+			if (context->replayOutput && !context->starting_replay_output && !context->stopping_replay_output &&
+			    !obs_output_active(context->replayOutput)) {
+				save_replay_hotkeys(context);
+				stop_output_async(context, &context->replayOutput, OUTPUT_TYPE_REPLAY);
+				dropped = true;
+			}
+			if (dropped)
+				context->last_retry_ns = now;
+		}
 		const bool need_file = context->record && !context->fileOutput && !context->starting_file_output &&
 				       !context->stopping_file_output;
 		const bool need_stream = context->stream && !context->streamOutput && !context->starting_stream_output &&
@@ -2486,6 +2731,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_property_list_add_int(p, obs_module_text("VirtualCamera"), OUTPUT_MODE_VIRTUAL_CAMERA);
 
 	obs_properties_add_path(record, "path", obs_module_text("Path"), OBS_PATH_DIRECTORY, NULL, NULL);
+	p = obs_properties_add_text(record, "path_manual", obs_module_text("PathManual"), OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(p, obs_module_text("PathManualDescription"));
 	obs_properties_add_text(record, "filename_formatting", obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
 	p = obs_properties_add_list(record, "rec_format", obs_module_text("RecFormat"), OBS_COMBO_TYPE_LIST,
 				    OBS_COMBO_FORMAT_STRING);
@@ -2775,6 +3022,7 @@ static void source_record_filter_filter_remove(void *data, obs_source_t *parent)
 	UNUSED_PARAMETER(parent);
 	struct source_record_filter_context *context = data;
 	context->closing = true;
+	stop_audio_capture(context);
 	stop_output_sync(context, context->fileOutput);
 	stop_output_sync(context, context->streamOutput);
 	stop_output_sync(context, context->replayOutput);
