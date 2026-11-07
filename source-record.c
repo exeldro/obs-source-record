@@ -78,6 +78,7 @@ struct source_record_filter_context {
 	/* Audio taken from the source as it is produced (after its filters),
 	 * independent of the OBS mixer tracks. */
 	uint64_t last_retry_ns;
+	volatile bool video_reset;
 	pthread_mutex_t capture_mutex;
 	obs_weak_source_t *captured_audio;
 	float *capture_buf[2];
@@ -1177,6 +1178,66 @@ static bool record_settings_changed(struct source_record_filter_context *filter,
 	return changed;
 }
 
+static void cat_sanitized(struct dstr *out, const char *name)
+{
+	for (const char *c = name ? name : ""; *c; c++) {
+		if (strchr("/\\:*?\"<>|%", *c))
+			dstr_cat_ch(out, '_');
+		else
+			dstr_cat_ch(out, *c);
+	}
+}
+
+/* Main OBS recording file name without folder and extension (#100). */
+static void cat_main_recording_name(struct dstr *out)
+{
+	obs_output_t *output = obs_frontend_get_recording_output();
+	if (!output)
+		return;
+	obs_data_t *settings = obs_output_get_settings(output);
+	const char *path = obs_data_get_string(settings, "path");
+	if (!path || !*path)
+		path = obs_data_get_string(settings, "url");
+	if (path && *path) {
+		const char *name = path;
+		for (const char *c = path; *c; c++)
+			if (*c == '/' || *c == '\\')
+				name = c + 1;
+		const char *dot = strrchr(name, '.');
+		const size_t len = dot ? (size_t)(dot - name) : strlen(name);
+		struct dstr base;
+		dstr_init(&base);
+		dstr_ncopy(&base, name, len);
+		cat_sanitized(out, base.array);
+		dstr_free(&base);
+	}
+	obs_data_release(settings);
+	obs_output_release(output);
+}
+
+/* Expands {source}, {filter} and {recording} in a filename format (#102,
+ * #100); the % specifiers are left for os_generate_formatted_filename. */
+static void expand_filename_format(struct source_record_filter_context *filter, const char *format, struct dstr *out)
+{
+	dstr_free(out);
+	dstr_init_copy(out, "");
+	obs_source_t *parent = obs_filter_get_parent(filter->source);
+	for (const char *c = format ? format : ""; *c;) {
+		if (strncmp(c, "{source}", 8) == 0) {
+			cat_sanitized(out, parent ? obs_source_get_name(parent) : "");
+			c += 8;
+		} else if (strncmp(c, "{filter}", 8) == 0) {
+			cat_sanitized(out, obs_source_get_name(filter->source));
+			c += 8;
+		} else if (strncmp(c, "{recording}", 11) == 0) {
+			cat_main_recording_name(out);
+			c += 11;
+		} else {
+			dstr_cat_ch(out, *c++);
+		}
+	}
+}
+
 static void start_file_output(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	if (filter->stopping_file_output)
@@ -1186,8 +1247,10 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	const char *format = obs_data_get_string(settings, "rec_format");
 	remember_record_settings(filter, settings);
 	const char *directory = filter->rec_path.array ? filter->rec_path.array : "";
-	char *filename =
-		os_generate_formatted_filename(GetFormatExt(format), true, obs_data_get_string(settings, "filename_formatting"));
+	struct dstr filename_format;
+	dstr_init(&filename_format);
+	expand_filename_format(filter, obs_data_get_string(settings, "filename_formatting"), &filename_format);
+	char *filename = os_generate_formatted_filename(GetFormatExt(format), true, filename_format.array);
 	struct dstr path;
 	dstr_init(&path);
 	dstr_printf(&path, "%s/%s", directory, filename);
@@ -1196,7 +1259,8 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 	claim_unique_path(&path);
 	obs_data_set_string(s, "path", path.array);
 	obs_data_set_string(s, "directory", directory);
-	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
+	obs_data_set_string(s, "format", filename_format.array);
+	dstr_free(&filename_format);
 	obs_data_set_string(s, "extension", GetFormatExt(format));
 	/* Files after a split are named by the output itself, which replaces
 	 * spaces by underscores unless allowed (#164). */
@@ -1430,7 +1494,11 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 		os_mkdirs(directory.array);
 	obs_data_set_string(s, "directory", directory.array ? directory.array : "");
 	dstr_free(&directory);
-	obs_data_set_string(s, "format", obs_data_get_string(settings, "replay_filename_formatting"));
+	struct dstr replay_format;
+	dstr_init(&replay_format);
+	expand_filename_format(filter, obs_data_get_string(settings, "replay_filename_formatting"), &replay_format);
+	obs_data_set_string(s, "format", replay_format.array);
+	dstr_free(&replay_format);
 	obs_data_set_string(s, "extension", GetFormatExt(obs_data_get_string(settings, "rec_format")));
 	obs_data_set_bool(s, "allow_spaces", true);
 	filter->replay_buffer_duration = obs_data_get_int(settings, "replay_duration");
@@ -1899,8 +1967,12 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			get_record_directory(settings, &directory);
 			obs_data_set_string(replay_settings, "directory", directory.array ? directory.array : "");
 			dstr_free(&directory);
-			obs_data_set_string(replay_settings, "format",
-					    obs_data_get_string(settings, "replay_filename_formatting"));
+			struct dstr replay_format;
+			dstr_init(&replay_format);
+			expand_filename_format(filter, obs_data_get_string(settings, "replay_filename_formatting"),
+					       &replay_format);
+			obs_data_set_string(replay_settings, "format", replay_format.array);
+			dstr_free(&replay_format);
 			obs_data_set_string(replay_settings, "extension",
 					    GetFormatExt(obs_data_get_string(settings, "rec_format")));
 		}
@@ -2358,6 +2430,28 @@ static void source_record_filter_tick(void *data, float seconds)
 
 	update_audio_capture(context);
 
+	if (context->video_reset) {
+		/* obs_reset_video freed the video_t of every view (#143): forget
+		 * it, and the encoder that was bound to it, and build them anew */
+		context->video_reset = false;
+		save_replay_hotkeys(context);
+		stop_output_async(context, &context->fileOutput, OUTPUT_TYPE_FILE);
+		stop_output_async(context, &context->streamOutput, OUTPUT_TYPE_STREAM);
+		stop_output_async(context, &context->replayOutput, OUTPUT_TYPE_REPLAY);
+		if (context->output_active) {
+			context->output_active = false;
+			obs_source_dec_showing(parent);
+		}
+		obs_encoder_release(context->encoder);
+		context->encoder = NULL;
+		context->video_output = NULL;
+		context->width = 0;
+		context->height = 0;
+		context->view_format = VIDEO_FORMAT_NONE;
+		context->wanted_view_format = get_view_format(context->source);
+		return;
+	}
+
 	if (context->enableHotkey == OBS_INVALID_HOTKEY_PAIR_ID)
 		context->enableHotkey = obs_hotkey_pair_register_source(
 			parent, "source_record.enable", obs_module_text("SourceRecordEnable"), "source_record.disable",
@@ -2733,7 +2827,8 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	obs_properties_add_path(record, "path", obs_module_text("Path"), OBS_PATH_DIRECTORY, NULL, NULL);
 	p = obs_properties_add_text(record, "path_manual", obs_module_text("PathManual"), OBS_TEXT_DEFAULT);
 	obs_property_set_long_description(p, obs_module_text("PathManualDescription"));
-	obs_properties_add_text(record, "filename_formatting", obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
+	p = obs_properties_add_text(record, "filename_formatting", obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(p, obs_module_text("FilenameFormattingDescription"));
 	p = obs_properties_add_list(record, "rec_format", obs_module_text("RecFormat"), OBS_COMBO_TYPE_LIST,
 				    OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p, "flv", "flv");
@@ -2817,7 +2912,9 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	p = obs_properties_add_int(replay, "replay_max_size_mb", obs_module_text("MaxMemory"), 1, 1000000, 1);
 	obs_property_int_set_suffix(p, " MB");
 
-	obs_properties_add_text(replay, "replay_filename_formatting", obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
+	p = obs_properties_add_text(replay, "replay_filename_formatting", obs_module_text("FilenameFormatting"),
+				    OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(p, obs_module_text("FilenameFormattingDescription"));
 
 	obs_properties_add_group(props, "replay_buffer", obs_module_text("ReplayBuffer"), OBS_GROUP_CHECKABLE, replay);
 
@@ -3754,12 +3851,24 @@ static void websocket_stop_stream(obs_data_t *request_data, obs_data_t *response
 	obs_data_set_bool(response_data, "success", success);
 }
 
+static void video_reset_signal(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	UNUSED_PARAMETER(cd);
+	for (size_t i = 0; i < source_record_filters.num; i++) {
+		struct source_record_filter_context *context = obs_obj_get_data(source_record_filters.array[i]);
+		if (context)
+			context->video_reset = true;
+	}
+}
+
 bool obs_module_load(void)
 {
 	blog(LOG_INFO, "[Source Record] loaded version %s", PROJECT_VERSION);
 	obs_register_source(&source_record_filter_info);
 
 	da_init(source_record_filters);
+	signal_handler_connect(obs_get_signal_handler(), "video_reset", video_reset_signal, NULL);
 
 	vendor = obs_websocket_register_vendor("source-record");
 	obs_websocket_vendor_register_request(vendor, "record_start", websocket_start_record, NULL);
@@ -3795,6 +3904,7 @@ void obs_module_post_load(void)
 
 void obs_module_unload(void)
 {
+	signal_handler_disconnect(obs_get_signal_handler(), "video_reset", video_reset_signal, NULL);
 	da_free(source_record_filters);
 }
 
