@@ -28,13 +28,13 @@ jobs:
         shell: zsh {0}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v7.0.1
         with:
           path: plugin
           submodules: recursive
 
       - name: Checkout obs-studio
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v7.0.1
         with:
           repository: 'obsproject/obs-studio'
           path: obs-studio
