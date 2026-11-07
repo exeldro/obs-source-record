@@ -7,6 +7,9 @@
 #include "version.h"
 #include "obs-websocket-api.h"
 
+#include <errno.h>
+#include <stdio.h>
+
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
@@ -67,6 +70,11 @@ struct source_record_filter_context {
 	bool remove_after_record;
 	long long record_max_seconds;
 	int last_frontend_event;
+	/* Path, container and filename pattern the running file output was
+	 * started with, to restart it when they change while recording. */
+	struct dstr rec_path;
+	struct dstr rec_format;
+	struct dstr rec_filename;
 };
 
 DARRAY(obs_source_t *) source_record_filters;
@@ -152,7 +160,7 @@ static bool audio_input_callback(void *param, uint64_t start_ts_in, uint64_t end
 {
 	UNUSED_PARAMETER(end_ts_in);
 	struct source_record_filter_context *filter = param;
-	if (filter->closing || obs_source_removed(filter->source)) {
+	if (!mixers || filter->closing || obs_source_removed(filter->source)) {
 		*out_ts = start_ts_in;
 		return true;
 	}
@@ -306,10 +314,19 @@ static void start_stream_output_task(void *data)
 	context->starting_stream_output = false;
 }
 
+static bool outputs_wanted(struct source_record_filter_context *context)
+{
+	if (!context->source || context->closing)
+		return false;
+	obs_source_t *parent = obs_filter_get_parent(context->source);
+	return parent && !obs_source_removed(parent) && obs_source_enabled(context->source) &&
+	       (context->replayBuffer || context->record || context->stream);
+}
+
 static void release_encoders(void *param)
 {
 	struct source_record_filter_context *context = param;
-	if (context->source && obs_source_enabled(context->source) && (context->replayBuffer || context->record || context->stream))
+	if (outputs_wanted(context))
 		return;
 	if (context->encoder && !obs_encoder_active(context->encoder)) {
 		obs_encoder_release(context->encoder);
@@ -753,26 +770,93 @@ static void strip_ffmpeg_option(struct dstr *str, const char *opt_name)
 	}
 }
 
+/* Two filters with the same folder and filename format generate the same path
+ * and would write over each other (#181, #105). Claim the name with an
+ * exclusive create and add the same " (2)" suffix OBS uses when it is taken. */
+static void claim_unique_path(struct dstr *path)
+{
+	const char *slash = strrchr(path->array, '/');
+	const char *backslash = strrchr(path->array, '\\');
+	if (backslash > slash)
+		slash = backslash;
+	const char *dot = strrchr(path->array, '.');
+	if (dot && slash && dot < slash)
+		dot = NULL;
+	const size_t ext_start = dot ? (size_t)(dot - path->array) : path->len;
+
+	struct dstr ext;
+	dstr_init_copy(&ext, path->array + ext_start);
+	struct dstr candidate;
+	dstr_init_copy_dstr(&candidate, path);
+
+	for (int n = 2; n < 1000; n++) {
+		FILE *f = os_fopen(candidate.array, "wbx");
+		if (f) {
+			fclose(f);
+			dstr_copy_dstr(path, &candidate);
+			break;
+		}
+		if (errno != EEXIST)
+			break;
+		dstr_resize(&candidate, ext_start);
+		dstr_catf(&candidate, " (%d)", n);
+		dstr_cat_dstr(&candidate, &ext);
+	}
+	dstr_free(&ext);
+	dstr_free(&candidate);
+}
+
+static void remember_record_settings(struct source_record_filter_context *filter, obs_data_t *settings)
+{
+	dstr_copy(&filter->rec_path, obs_data_get_string(settings, "path"));
+	dstr_copy(&filter->rec_format, obs_data_get_string(settings, "rec_format"));
+	dstr_copy(&filter->rec_filename, obs_data_get_string(settings, "filename_formatting"));
+}
+
+/* True when the path, container or filename pattern differs from what the
+ * running file output was started with. */
+static bool record_settings_changed(struct source_record_filter_context *filter, obs_data_t *settings)
+{
+	return dstr_cmp(&filter->rec_path, obs_data_get_string(settings, "path")) != 0 ||
+	       dstr_cmp(&filter->rec_format, obs_data_get_string(settings, "rec_format")) != 0 ||
+	       dstr_cmp(&filter->rec_filename, obs_data_get_string(settings, "filename_formatting")) != 0;
+}
+
 static void start_file_output(struct source_record_filter_context *filter, obs_data_t *settings)
 {
 	if (filter->stopping_file_output)
 		return;
 
 	obs_data_t *s = obs_data_create();
-	char path[512];
 	const char *format = obs_data_get_string(settings, "rec_format");
+	const char *directory = obs_data_get_string(settings, "path");
+	remember_record_settings(filter, settings);
 	char *filename =
 		os_generate_formatted_filename(GetFormatExt(format), true, obs_data_get_string(settings, "filename_formatting"));
-	snprintf(path, 512, "%s/%s", obs_data_get_string(settings, "path"), filename);
+	struct dstr path;
+	dstr_init(&path);
+	dstr_printf(&path, "%s/%s", directory, filename);
 	bfree(filename);
-	ensure_directory(path);
-	obs_data_set_string(s, "path", path);
-	obs_data_set_string(s, "directory", obs_data_get_string(settings, "path"));
+	ensure_directory(path.array);
+	claim_unique_path(&path);
+	obs_data_set_string(s, "path", path.array);
+	obs_data_set_string(s, "directory", directory);
 	obs_data_set_string(s, "format", obs_data_get_string(settings, "filename_formatting"));
 	obs_data_set_string(s, "extension", GetFormatExt(format));
-	obs_data_set_bool(s, "split_file", obs_data_get_bool(settings, "split_file"));
-	obs_data_set_int(s, "max_size_mb", obs_data_get_int(settings, "max_size_mb"));
-	obs_data_set_int(s, "max_time_sec", obs_data_get_int(settings, "max_time_sec"));
+	/* Files after a split are named by the output itself, which replaces
+	 * spaces by underscores unless allowed (#164). */
+	obs_data_set_bool(s, "allow_spaces", true);
+	/* The outputs ignore a manual split (hotkey, button, websocket) unless
+	 * split_file is on, so it always is; the checkbox only decides whether
+	 * the automatic size and time limits apply. */
+	const bool auto_split = obs_data_get_bool(settings, "split_file");
+	obs_data_set_bool(s, "split_file", true);
+	obs_data_set_int(s, "max_size_mb", auto_split ? obs_data_get_int(settings, "max_size_mb") : 0);
+	obs_data_set_int(s, "max_time_sec", auto_split ? obs_data_get_int(settings, "max_time_sec") : 0);
+	/* What OBS itself passes for its fragmented formats. Without it the muxer
+	 * writes a plain MP4/MOV that is lost if OBS dies while recording. */
+	if (strcmp(format, "fragmented_mp4") == 0 || strcmp(format, "fragmented_mov") == 0)
+		obs_data_set_string(s, "muxer_settings", "movflags=frag_keyframe+empty_moov+delay_moov");
 
 	const char *output_id = "ffmpeg_muxer";
 	if (strcmp(format, "hybrid_mp4") == 0) {
@@ -785,7 +869,7 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 		output_id = "ffmpeg_output";
 		/* The ffmpeg output encodes and muxes on its own, so it takes the
 		 * encoder and container settings directly instead of OBS encoders. */
-		obs_data_set_string(s, "url", path);
+		obs_data_set_string(s, "url", path.array);
 		obs_data_set_string(s, "format_name", get_ffmpeg_format_name(format));
 		const char *video_encoder = get_ffmpeg_video_encoder(obs_data_get_string(settings, "ff_video_encoder"));
 		obs_data_set_string(s, "video_encoder", video_encoder);
@@ -846,6 +930,7 @@ static void start_file_output(struct source_record_filter_context *filter, obs_d
 			}
 		}
 	}
+	dstr_free(&path);
 	if (filter->fileOutput && strcmp(obs_output_get_id(filter->fileOutput), output_id) != 0) {
 		if (obs_output_active(filter->fileOutput)) {
 			stop_output_async(filter, &filter->fileOutput, OUTPUT_TYPE_FILE);
@@ -987,7 +1072,7 @@ static void start_replay_output(struct source_record_filter_context *filter, obs
 	obs_data_set_bool(s, "allow_spaces", true);
 	filter->replay_buffer_duration = obs_data_get_int(settings, "replay_duration");
 	obs_data_set_int(s, "max_time_sec", filter->replay_buffer_duration);
-	obs_data_set_int(s, "max_size_mb", 10000);
+	obs_data_set_int(s, "max_size_mb", obs_data_get_int(settings, "replay_max_size_mb"));
 	if (!filter->replayOutput) {
 		obs_data_t *hotkeys = obs_data_get_obj(settings, "replay_hotkeys");
 		struct dstr name;
@@ -1395,6 +1480,17 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 			if (parent)
 				obs_source_dec_showing(parent);
 		}
+	} else if (record && filter->fileOutput && !filter->closing && !filter->stopping_file_output &&
+		   record_settings_changed(filter, settings)) {
+		/* A running muxer cannot move to another file, so the recording is
+		 * split: the current file is finished and the tick starts a new one
+		 * with the new path, container or filename pattern. */
+		blog(LOG_INFO, "[Source Record] recording settings of '%s' changed while recording, restarting the output",
+		     obs_source_get_name(filter->source));
+		signal_handler_t *sh = obs_output_get_signal_handler(filter->fileOutput);
+		if (sh)
+			signal_handler_disconnect(sh, "stop", remove_filter, filter);
+		stop_output_async(filter, &filter->fileOutput, OUTPUT_TYPE_FILE);
 	}
 
 	if (record && filter->fileOutput && filter->last_frontend_event == OBS_FRONTEND_EVENT_RECORDING_PAUSED &&
@@ -1426,14 +1522,20 @@ static void source_record_filter_update(void *data, obs_data_t *settings)
 
 		filter->replayBuffer = replay_buffer;
 	} else if (replay_buffer && filter->replayOutput && obs_source_enabled(filter->source)) {
-		if (filter->replay_buffer_duration != obs_data_get_int(settings, "replay_duration")) {
+		obs_data_t *replay_settings = obs_output_get_settings(filter->replayOutput);
+		if (filter->replay_buffer_duration != obs_data_get_int(settings, "replay_duration") ||
+		    obs_data_get_int(replay_settings, "max_size_mb") != obs_data_get_int(settings, "replay_max_size_mb")) {
 			obs_data_t *hotkeys = obs_hotkeys_save_output(filter->replayOutput);
 			obs_data_set_obj(settings, "replay_hotkeys", hotkeys);
 			obs_data_release(hotkeys);
 			stop_output_async(filter, &filter->replayOutput, OUTPUT_TYPE_REPLAY);
+		} else {
+			obs_data_set_string(replay_settings, "directory", obs_data_get_string(settings, "path"));
+			obs_data_set_string(replay_settings, "format",
+					    obs_data_get_string(settings, "replay_filename_formatting"));
+			obs_data_set_string(replay_settings, "extension",
+					    GetFormatExt(obs_data_get_string(settings, "rec_format")));
 		}
-		obs_data_t *replay_settings = obs_output_get_settings(filter->replayOutput);
-		obs_data_set_string(replay_settings, "format", obs_data_get_string(settings, "replay_filename_formatting"));
 		obs_data_release(replay_settings);
 	}
 
@@ -1513,24 +1615,37 @@ static void source_record_filter_save(void *data, obs_data_t *settings)
 	}
 }
 
+static const char *config_string_or(config_t *config, const char *section, const char *name, const char *fallback)
+{
+	const char *val = config ? config_get_string(config, section, name) : NULL;
+	return (val && *val) ? val : fallback;
+}
+
 static void source_record_filter_defaults(obs_data_t *settings)
 {
 	config_t *config = obs_frontend_get_profile_config();
 
-	const char *mode = config_get_string(config, "Output", "Mode");
-	const char *type = config_get_string(config, "AdvOut", "RecType");
-	const char *adv_path = strcmp(type, "Standard") != 0 || strcmp(type, "standard") != 0
-				       ? config_get_string(config, "AdvOut", "FFFilePath")
-				       : config_get_string(config, "AdvOut", "RecFilePath");
-	bool adv_out = strcmp(mode, "Advanced") == 0 || strcmp(mode, "advanced") == 0;
-	const char *rec_path = adv_out ? adv_path : config_get_string(config, "SimpleOutput", "FilePath");
+	const char *mode = config_string_or(config, "Output", "Mode", "Simple");
+	const bool adv_out = astrcmpi(mode, "Advanced") == 0;
+	/* Advanced output records either with the standard recorder or with
+	 * the custom FFmpeg output, each with its own path (#42). */
+	const char *type = config_string_or(config, "AdvOut", "RecType", "Standard");
+	const bool adv_ffmpeg = astrcmpi(type, "FFmpeg") == 0;
+	const char *adv_path = adv_ffmpeg ? config_string_or(config, "AdvOut", "FFFilePath", NULL)
+					  : config_string_or(config, "AdvOut", "RecFilePath", NULL);
+	const char *rec_path = adv_out ? adv_path : config_string_or(config, "SimpleOutput", "FilePath", NULL);
+	if (!rec_path)
+		rec_path = config_string_or(config, "SimpleOutput", "FilePath", "");
 
 	obs_data_set_default_string(settings, "path", rec_path);
-	const char *format = config_get_string(config, "Output", "FilenameFormatting");
+	const char *format = config_string_or(config, "Output", "FilenameFormatting", "%CCYY-%MM-%DD %hh-%mm-%ss");
 	obs_data_set_default_string(settings, "filename_formatting", format);
 	obs_data_set_default_string(settings, "replay_filename_formatting", format);
-	obs_data_set_default_string(settings, "rec_format",
-				    config_get_string(config, adv_out ? "AdvOut" : "SimpleOutput", "RecFormat2"));
+	const char *section = adv_out ? "AdvOut" : "SimpleOutput";
+	const char *rec_format = config_string_or(config, section, "RecFormat2", NULL);
+	if (!rec_format)
+		rec_format = config_string_or(config, section, "RecFormat", "mkv");
+	obs_data_set_default_string(settings, "rec_format", rec_format);
 
 	/* Custom Output (FFmpeg) */
 	obs_data_set_default_bool(settings, "custom_ffmpeg_output", false);
@@ -1547,28 +1662,29 @@ static void source_record_filter_defaults(obs_data_t *settings)
 
 	const char *enc_id;
 	if (adv_out) {
-		enc_id = config_get_string(config, "AdvOut", "RecEncoder");
-		if (strcmp(enc_id, "none") == 0 || strcmp(enc_id, "None") == 0)
-			enc_id = config_get_string(config, "AdvOut", "Encoder");
-		else if (strcmp(enc_id, "jim_nvenc") == 0 || strcmp(enc_id, "obs_nvenc_h264_tex") == 0)
-			enc_id = "nvenc";
-
+		enc_id = config_string_or(config, "AdvOut", "RecEncoder", "none");
+		if (astrcmpi(enc_id, "none") == 0)
+			enc_id = config_string_or(config, "AdvOut", "Encoder", "x264");
 	} else {
-		const char *quality = config_get_string(config, "SimpleOutput", "RecQuality");
-		if (strcmp(quality, "Stream") == 0 || strcmp(quality, "stream") == 0) {
-			enc_id = config_get_string(config, "SimpleOutput", "StreamEncoder");
-		} else if (strcmp(quality, "Lossless") == 0 || strcmp(quality, "lossless") == 0) {
-			enc_id = "ffmpeg_output";
+		const char *quality = config_string_or(config, "SimpleOutput", "RecQuality", "Stream");
+		if (astrcmpi(quality, "Stream") == 0) {
+			enc_id = config_string_or(config, "SimpleOutput", "StreamEncoder", "x264");
+		} else if (astrcmpi(quality, "Lossless") == 0) {
+			/* lossless uses the ffmpeg output, not an encoder */
+			enc_id = "x264";
 		} else {
-			enc_id = config_get_string(config, "SimpleOutput", "RecEncoder");
+			enc_id = config_string_or(config, "SimpleOutput", "RecEncoder", "x264");
 		}
 	}
+	if (strcmp(enc_id, "jim_nvenc") == 0 || strcmp(enc_id, "obs_nvenc_h264_tex") == 0)
+		enc_id = "nvenc";
 	obs_data_set_default_string(settings, "encoder", enc_id);
 
 	obs_data_set_default_string(settings, "audio_encoder", "ffmpeg_aac");
 
 	set_encoder_defaults(settings);
 	obs_data_set_default_int(settings, "replay_duration", 5);
+	obs_data_set_default_int(settings, "replay_max_size_mb", 10000);
 	obs_data_set_default_int(settings, "max_size_mb", 2048);
 	obs_data_set_default_int(settings, "max_time_sec", 15 * 60);
 }
@@ -1691,6 +1807,10 @@ static void source_record_filter_destroy(void *data)
 		context->view = NULL;
 	}
 
+	dstr_free(&context->rec_path);
+	dstr_free(&context->rec_format);
+	dstr_free(&context->rec_filename);
+
 	context->source = NULL;
 	bfree(context);
 }
@@ -1800,6 +1920,46 @@ static void source_record_replay_hotkey(void *data, obs_hotkey_id id, obs_hotkey
 	calldata_free(&cd);
 }
 
+/* Keep the bindings of the replay buffer output's own hotkeys when the
+ * output is recreated (#24). */
+static void save_replay_hotkeys(struct source_record_filter_context *context)
+{
+	if (!context->replayOutput)
+		return;
+	obs_data_t *hotkeys = obs_hotkeys_save_output(context->replayOutput);
+	obs_data_t *settings = obs_source_get_settings(context->source);
+	obs_data_set_obj(settings, "replay_hotkeys", hotkeys);
+	obs_data_release(settings);
+	obs_data_release(hotkeys);
+}
+
+/* The view holds a reference to the parent and OBS renders every view each
+ * frame, whether or not anything encodes it (#38, #135). Once nothing records
+ * the source is taken off the view and the video output is dropped. */
+static void release_idle_view(struct source_record_filter_context *context)
+{
+	if (!context->view || context->starting_file_output || context->starting_stream_output ||
+	    context->starting_replay_output || context->stopping_file_output || context->stopping_stream_output ||
+	    context->stopping_replay_output || os_atomic_load_long(&context->active_stop_threads) > 0)
+		return;
+
+	obs_source_t *view_source = obs_view_get_source(context->view, SOURCE_CHANNEL);
+	if (view_source) {
+		obs_view_set_source(context->view, SOURCE_CHANNEL, NULL);
+		obs_source_release(view_source);
+	}
+
+	/* an encoder that has been used cannot be moved to another video_t, so
+	 * the video_t only goes once the encoder has been released */
+	if (context->video_output && !context->encoder) {
+		obs_view_remove(context->view);
+		context->video_output = NULL;
+		context->width = 0;
+		context->height = 0;
+		context->view_format = VIDEO_FORMAT_NONE;
+	}
+}
+
 static void source_record_filter_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
@@ -1840,7 +2000,7 @@ static void source_record_filter_tick(void *data, float seconds)
 
 	if (context->replayHotkey == OBS_INVALID_HOTKEY_ID)
 		context->replayHotkey = obs_hotkey_register_source(parent, "source_record.SaveReplay",
-								   obs_frontend_get_locale_string("Basic.Main.SaveReplay"),
+								   obs_module_text("SaveReplay"),
 								   source_record_replay_hotkey, context);
 
 
@@ -1860,7 +2020,9 @@ static void source_record_filter_tick(void *data, float seconds)
 	const bool format_changed =
 		context->video_output != NULL && context->view_format != context->wanted_view_format;
 
-	if (width && height && !context->video_output) {
+	const bool wanted = outputs_wanted(context);
+
+	if (width && height && !context->video_output && wanted) {
 		struct obs_video_info ovi = {0};
 		obs_get_video_info(&ovi);
 
@@ -1911,13 +2073,14 @@ static void source_record_filter_tick(void *data, float seconds)
 	}
 
 	if (context->restart && context->output_active) {
+		save_replay_hotkeys(context);
 		stop_output_async(context, &context->fileOutput, OUTPUT_TYPE_FILE);
 		stop_output_async(context, &context->streamOutput, OUTPUT_TYPE_STREAM);
 		stop_output_async(context, &context->replayOutput, OUTPUT_TYPE_REPLAY);
 		context->output_active = false;
 		context->restart = false;
 		obs_source_dec_showing(obs_filter_get_parent(context->source));
-	} else if (obs_source_enabled(context->source)) {
+	} else if (wanted) {
 		const bool need_file = context->record && !context->fileOutput && !context->starting_file_output &&
 				       !context->stopping_file_output;
 		const bool need_stream = context->stream && !context->streamOutput && !context->starting_stream_output &&
@@ -1930,7 +2093,14 @@ static void source_record_filter_tick(void *data, float seconds)
 				return;
 			/* Fix: don't start new outputs (and reuse / re-point the encoder)
 			 * while a previous output is still draining it -> use-after-free. */
-			if (context->encoder && obs_encoder_active(context->encoder))
+			if (context->stopping_file_output || context->stopping_stream_output || context->stopping_replay_output ||
+			    os_atomic_load_long(&context->active_stop_threads) > 0)
+				return;
+			/* An encoder still in use by another running output is shared, as
+			 * OBS does for its own outputs. An idle but still active encoder
+			 * (nothing running) is draining: wait for it. */
+			if (context->encoder && obs_encoder_active(context->encoder) && !context->fileOutput &&
+			    !context->streamOutput && !context->replayOutput)
 				return;
 			obs_data_t *s = obs_source_get_settings(context->source);
 			const bool custom = use_custom_ffmpeg_output(s);
@@ -1984,12 +2154,24 @@ static void source_record_filter_tick(void *data, float seconds)
 				start_replay_output(context, s);
 			obs_data_release(s);
 		}
-	} else if (context->output_active && !obs_source_enabled(context->source)) {
+	} else if (context->output_active) {
+		/* filter disabled or parent removed (#109) */
+		save_replay_hotkeys(context);
 		stop_output_async(context, &context->fileOutput, OUTPUT_TYPE_FILE);
 		stop_output_async(context, &context->streamOutput, OUTPUT_TYPE_STREAM);
 		stop_output_async(context, &context->replayOutput, OUTPUT_TYPE_REPLAY);
 		context->output_active = false;
-		obs_source_dec_showing(obs_filter_get_parent(context->source));
+		obs_source_dec_showing(parent);
+	} else if (!context->starting_file_output && !context->starting_stream_output && !context->starting_replay_output) {
+		if (context->fileOutput || context->streamOutput || context->replayOutput) {
+			/* outputs that never started, e.g. after a failed start */
+			save_replay_hotkeys(context);
+			stop_output_async(context, &context->fileOutput, OUTPUT_TYPE_FILE);
+			stop_output_async(context, &context->streamOutput, OUTPUT_TYPE_STREAM);
+			stop_output_async(context, &context->replayOutput, OUTPUT_TYPE_REPLAY);
+		} else {
+			release_idle_view(context);
+		}
 	}
 
 	if (context->output_active && context->fileOutput && context->record_max_seconds) {
@@ -2098,14 +2280,14 @@ static bool source_record_split_button(obs_properties_t *props, obs_property_t *
 	UNUSED_PARAMETER(props);
 	UNUSED_PARAMETER(property);
 	struct source_record_filter_context *context = data;
-	if (!context->fileOutput)
+	if (!context || !context->fileOutput)
 		return false;
 	proc_handler_t *ph = obs_output_get_proc_handler(context->fileOutput);
 	struct calldata cd;
 	calldata_init(&cd);
 	proc_handler_call(ph, "split_file", &cd);
 	calldata_free(&cd);
-	return true;
+	return false;
 }
 
 bool output_exists(const char *id)
@@ -2160,10 +2342,12 @@ static obs_properties_t *source_record_filter_properties(void *data)
 	p = obs_properties_add_int(split_file, "max_size_mb",
 				   obs_frontend_get_locale_string("Basic.Settings.Output.SplitFile.Size"), 0, 1073741824, 1);
 	obs_property_int_set_suffix(p, " MB");
-	obs_properties_add_button2(split_file, "split_file_now", obs_frontend_get_locale_string("Basic.Main.SplitFile"),
-				   source_record_split_button, data);
 	obs_properties_add_group(record, "split_file", obs_frontend_get_locale_string("Basic.Settings.Output.EnableSplitFile"),
 				 OBS_GROUP_CHECKABLE, split_file);
+	/* Manual splits work without automatic splitting, so the button is not
+	 * inside the checkable group that greys it out. */
+	obs_properties_add_button2(record, "split_file_now", obs_frontend_get_locale_string("Basic.Main.SplitFile"),
+				   source_record_split_button, data);
 
 	obs_properties_add_int(record, "record_max_seconds", obs_module_text("MaxSeconds"), 0, 31536000, 1);
 
@@ -2214,6 +2398,9 @@ static obs_properties_t *source_record_filter_properties(void *data)
 
 	p = obs_properties_add_int(replay, "replay_duration", obs_module_text("Duration"), 1, 10000, 1);
 	obs_property_int_set_suffix(p, "s");
+
+	p = obs_properties_add_int(replay, "replay_max_size_mb", obs_module_text("MaxMemory"), 1, 1000000, 1);
+	obs_property_int_set_suffix(p, " MB");
 
 	obs_properties_add_text(replay, "replay_filename_formatting", obs_module_text("FilenameFormatting"), OBS_TEXT_DEFAULT);
 
