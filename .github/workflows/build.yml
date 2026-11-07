@@ -2,7 +2,8 @@ name: build obs plugin
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, 'claude/**' ]
+  workflow_dispatch:
   pull_request:
     branches: [ master ]
 
