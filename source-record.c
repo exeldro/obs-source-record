@@ -1212,7 +1212,7 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 			config_t *config = obs_frontend_get_profile_config();
 			for (int i = 0; i < MAX_AUDIO_MIXES; i++) {
 				char trackNameSetting[16];
-				snprintf(trackNameSetting, sizeof(trackNameSetting), "Track%dName", i);
+				snprintf(trackNameSetting, sizeof(trackNameSetting), "Track%dName", i + 1);
 				const char *trackName = config_get_string(config, "AdvOut", trackNameSetting);
 				if (trackName && strlen(trackName) > 0) {
 					dstr_printf(&name, "%s", trackName);
@@ -1231,7 +1231,7 @@ static void update_encoder(struct source_record_filter_context *filter, obs_data
 				if ((audio_track_mask & (1u << i)) == 0)
 					continue;
 				char trackNameSetting[16];
-				snprintf(trackNameSetting, sizeof(trackNameSetting), "Track%dName", i);
+				snprintf(trackNameSetting, sizeof(trackNameSetting), "Track%dName", i + 1);
 				const char *trackName = config_get_string(config, "AdvOut", trackNameSetting);
 				if (trackName && strlen(trackName) > 0) {
 					dstr_printf(&name, "%s", trackName);
