@@ -67,6 +67,7 @@ struct source_record_filter_context {
 	bool remove_after_record;
 	long long record_max_seconds;
 	int last_frontend_event;
+	bool late_start_queued;
 };
 
 DARRAY(obs_source_t *) source_record_filters;
@@ -1800,6 +1801,7 @@ static void source_record_replay_hotkey(void *data, obs_hotkey_id id, obs_hotkey
 	calldata_free(&cd);
 }
 
+static void update_task(void *param);
 static void source_record_filter_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
@@ -1815,6 +1817,19 @@ static void source_record_filter_tick(void *data, float seconds)
 		context->closing = true;
 		return;
 	}
+
+	/* If recording was requested while the source had no size yet (a camera that is still starting,
+	 * a window capture without a window), no file output could be created and nothing retried.
+	 * Once the video output exists, run the normal update again so the recording starts. */
+	if (context->record && !context->fileOutput && context->video_output && !context->stopping_file_output &&
+	    !context->late_start_queued && obs_source_enabled(context->source)) {
+		blog(LOG_INFO, "[Source Record] %s: source has video now, starting recording", obs_source_get_name(parent));
+		context->record = false;
+		context->late_start_queued = true;
+		obs_queue_task(OBS_TASK_GRAPHICS, update_task, context, false);
+	}
+	if (context->fileOutput)
+		context->late_start_queued = false;
 
 	if (context->enableHotkey == OBS_INVALID_HOTKEY_PAIR_ID)
 		context->enableHotkey = obs_hotkey_pair_register_source(
